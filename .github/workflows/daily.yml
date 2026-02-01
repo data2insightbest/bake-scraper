@@ -3,7 +3,7 @@ name: Daily BAKE Scraper
 on:
   schedule:
     # This runs at 14:00 UTC every day (6:00 AM PST)
-    - cron: '0 14 * * *'
+    - cron: '0 13 * * *'
   # This line adds a "Run Workflow" button so you can test it manually
   workflow_dispatch:
 
