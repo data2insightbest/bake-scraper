@@ -1,115 +1,114 @@
 import os
 import requests
-import re
+import json
+import time
+import google.generativeai as genai
 from bs4 import BeautifulSoup
 from supabase import create_client
 from datetime import datetime
 
-# 1. Setup Supabase
+# 1. SETUP & AUTHENTICATION
+# These must be set in your GitHub Secrets and Replit Secrets
 URL = os.environ.get("SUPABASE_URL")
 KEY = os.environ.get("SUPABASE_KEY")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+
+# Initialize Clients
 supabase = create_client(URL, KEY)
+genai.configure(api_key=GEMINI_KEY)
+# Using flash for speed and to stay in the free tier
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-def clean_and_summarize(text, keywords):
+def get_ai_summary(text, museum_name):
     """
-    Filters out 'junk' and finds the most informative sentence 
-    containing the event keywords.
+    Sends raw text to Gemini AI to extract a specific, high-quality event summary.
+    This mimics the human-like search results we discussed.
     """
-    # Remove excessive whitespace and hidden characters
-    clean_text = ' '.join(text.split())
+    prompt = f"""
+    You are a professional kids' event curator for 'BAKE'. 
+    Analyze the following text from {museum_name}.
+    Identify the most interesting UPCOMING specific workshop, festival, or event for children.
     
-    # Split the page into actual sentences
-    sentences = re.split(r'(?<=[.!?]) +', clean_text)
+    Return ONLY a JSON object in this format:
+    {{
+      "title": "Specific Event Name (e.g. Penguin Mailbox Build)",
+      "snippet": "One catchy, informative sentence describing what kids will actually do.",
+      "price": "Exact price (e.g. $15) or 'Free'",
+      "found": true
+    }}
+    If you only find general admission info and no specific upcoming event, return: {{"found": false}}
     
-    found_words = []
-    best_sentence = ""
-    
-    # Identify keywords present
-    text_lower = clean_text.lower()
-    for word in keywords:
-        if word in text_lower:
-            found_words.append(word)
-
-    # Scoring logic for the "Best Sentence"
-    for s in sentences:
-        s_lower = s.lower()
-        # Check if the sentence contains our keywords
-        matches = [w for w in keywords if w in s_lower]
-        
-        if matches:
-            # We want sentences that are informative (not too short) 
-            # but not 'terms and conditions' (not too long).
-            if 40 < len(s) < 200:
-                # Priority: Sentences with 'you', 'join', 'kids', 'family', or '$'
-                if any(x in s_lower for x in ['you', 'join', 'kids', 'family', '$']):
-                    best_sentence = s
-                    break # Found a perfect 'Hero' sentence
-                elif not best_sentence:
-                    best_sentence = s
-
-    # Final Cleanup of the snippet
-    snippet = best_sentence.strip() if best_sentence else "Discover special programs and seasonal activities at this location."
-    
-    # Calculate Specificity Score
-    score = (len(set(found_words)) * 15)
-    if any(x in text_lower for x in ["one-day", "limited", "annual", "registration"]):
-        score += 25
-        
-    # Price Detection
-    price = "See Website"
-    if "free" in text_lower:
-        price = "Free"
-    else:
-        price_match = re.search(r'\$\d+(?:\.\d{2})?', clean_text)
-        if price_match:
-            price = price_match.group(0)
-
-    return min(score, 100), list(set(found_words)), price, snippet
+    Website Data: {text[:4000]}
+    """
+    try:
+        response = model.generate_content(prompt)
+        # Clean the response in case the AI wraps it in markdown code blocks
+        clean_json = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(clean_json)
+    except Exception as e:
+        print(f"   ⚠️ AI Processing error: {e}")
+        return {"found": False}
 
 def run_bake_scraper():
-    places = supabase.table("places").select("*").execute().data
-    keywords = ["workshop", "festival", "holiday", "storytime", "camp", "exhibit", "performance", "family day", "kids", "free day"]
+    # Fetch all locations from your 'places' table
+    print("Fetching location list from Supabase...")
+    places_res = supabase.table("places").select("*").execute()
+    places = places_res.data
+    
+    print(f"🚀 BAKE AI Scraper Started. Processing {len(places)} locations.")
+    print("Note: Running with a 4.5s delay to stay within Gemini's Free Tier (15 RPM).")
 
-    print(f"🚀 BAKE Scraper: Processing {len(places)} locations for informative snippets...")
-
-    for place in places:
+    for index, place in enumerate(places):
+        name = place.get('name', 'Unknown Location')
+        target_url = place.get('url')
+        
         try:
+            # 1. FETCH WEBSITE HTML
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            res = requests.get(place['url'], timeout=15, headers=headers)
-            if res.status_code != 200: continue
+            res = requests.get(target_url, timeout=15, headers=headers)
+            if res.status_code != 200:
+                print(f"   ⏩ Skipping {name}: Status {res.status_code}")
+                continue
 
+            # 2. CLEAN HTML (Remove scripts, styles, and nav to focus on content)
             soup = BeautifulSoup(res.text, 'html.parser')
+            for element in soup(["script", "style", "nav", "footer", "header"]):
+                element.decompose()
             
-            # Remove scripts and styles so we don't 'scrape' code
-            for script in soup(["script", "style"]):
-                script.decompose()
+            # Join text and remove extra whitespace
+            clean_text = ' '.join(soup.stripped_strings)
 
-            page_text = soup.get_text()
-            score, found, price, snippet = clean_and_summarize(page_text, keywords)
+            # 3. CALL THE AI MAGIC
+            ai_data = get_ai_summary(clean_text, name)
 
-            if score > 0:
-                primary = found[0].title() if found else "Activity"
-                smart_title = f"{primary} at {place['name']}"
-
+            if ai_data and ai_data.get("found"):
                 event_data = {
                     "place_id": place['id'],
-                    "title": smart_title,
-                    "description": f"Targeted search for: {', '.join(found[:3])}",
-                    "snippet": snippet, # This is now a full, clean sentence
-                    "price_text": price,
-                    "specificity_score": score,
+                    "title": ai_data.get('title'),
+                    "snippet": ai_data.get('snippet'),
+                    "price_text": ai_data.get('price'),
+                    "specificity_score": 95, # AI-verified events get top priority
+                    
                     "event_date": datetime.now().strftime("%Y-%m-%d"),
                     "zip_code": place.get('zip_code'),
                     "category_name": place.get('category'),
-                    "event_url": place['url']
+                    "event_url": target_url
                 }
                 
+                # 4. UPSERT TO SUPABASE
                 supabase.table("events").upsert(event_data).execute()
-                print(f"✅ {place['name']}: {snippet[:50]}...")
+                print(f"✅ [{index+1}/{len(places)}] {name}: Found '{ai_data['title']}'")
+            else:
+                print(f"⚪ [{index+1}/{len(places)}] {name}: No specific event identified.")
+
+            # 5. RATE LIMITING (Wait 4.5 seconds to stay under 15 requests per minute)
+            time.sleep(4.5)
 
         except Exception as e:
-            print(f"❌ Error at {place['name']}: {e}")
+            print(f"❌ Error at {name}: {e}")
+            time.sleep(2) # Short pause on error before next attempt
+
+    print("🏁 Scrape Complete! Your database is now AI-enriched.")
 
 if __name__ == "__main__":
     run_bake_scraper()
-    
