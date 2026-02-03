@@ -1,8 +1,10 @@
-const testInsert = await supabase
-  .from('events')
-  .insert([{ title: "TEST EVENT - FEB 3", zip_code: "00000" }]);
-
-console.log("Test Write Response:", testInsert);
+# Test write to see if the connection actually works
+try:
+    test_data = {"title": "TEST EVENT - FEB 3", "zip_code": "00000"}
+    response = supabase.table('events').insert(test_data).execute()
+    print("Test Write Success:", response)
+except Exception as e:
+    print("Test Write Failed Error:", e)
 
 import os
 import requests
