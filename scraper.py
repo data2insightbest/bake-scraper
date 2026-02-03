@@ -1,11 +1,3 @@
-# Test write to see if the connection actually works
-try:
-    test_data = {"title": "TEST EVENT - FEB 3", "zip_code": "00000"}
-    response = supabase.table('events').insert(test_data).execute()
-    print("Test Write Success:", response)
-except Exception as e:
-    print("Test Write Failed Error:", e)
-
 import os
 import requests
 import json
@@ -27,6 +19,14 @@ genai.configure(api_key=GEMINI_KEY)
 # Using flash for speed and to stay in the free tier
 model = genai.GenerativeModel('gemini-1.5-flash')
 
+# Test write to see if the connection actually works
+try:
+    test_data = {"title": "TEST EVENT - FEB 3", "zip_code": "00000"}
+    response = supabase.table('events').insert(test_data).execute()
+    print("Test Write Success:", response)
+except Exception as e:
+    print("Test Write Failed Error:", e)
+    
 def get_ai_summary(text, museum_name):
     """
     Sends raw text to Gemini AI to extract a specific, high-quality event summary.
