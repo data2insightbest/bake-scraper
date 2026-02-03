@@ -1,3 +1,9 @@
+const testInsert = await supabase
+  .from('events')
+  .insert([{ title: "TEST EVENT - FEB 3", zip_code: "00000" }]);
+
+console.log("Test Write Response:", testInsert);
+
 import os
 import requests
 import json
