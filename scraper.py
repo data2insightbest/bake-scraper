@@ -19,9 +19,13 @@ genai.configure(api_key=GEMINI_KEY)
 # Using flash for speed and to stay in the free tier
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# Test write to see if the connection actually works
 try:
-    test_data = {"title": "TEST EVENT - FEB 3", "zip_code": "00000"}
+    # Adding event_date to satisfy the database constraint
+    test_data = {
+        "title": "TEST EVENT - FEB 3", 
+        "zip_code": "00000",
+        "event_date": "2026-02-03" 
+    }
     response = supabase.table('events').insert(test_data).execute()
     print("Test Write Success:", response)
 except Exception as e:
