@@ -102,7 +102,7 @@ def run_bake_scraper():
             else:
                 print(f"⚪ [{index+1}/{len(places)}] {name}: AI found no new specific events.")
 
-            time.sleep(4.5)
+            time.sleep(10)
 
         except Exception as e:
             # THIS IS CRITICAL: It will tell you exactly why a row fails (like the Date error we saw)
