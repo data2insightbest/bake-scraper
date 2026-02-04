@@ -15,7 +15,7 @@ GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 # Initialize Clients
 supabase = create_client(URL, KEY)
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 def get_ai_summary(text, museum_name):
     """
