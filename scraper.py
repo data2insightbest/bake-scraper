@@ -50,6 +50,8 @@ def run_bake_scraper():
     print("Fetching location list from Supabase...")
     places_res = supabase.table("places").select("*").execute()
     places = places_res.data
+    # TEMPORARY CHANGE for testing:
+    places = places_res.data[:5] # Only process the first 5 locations
     
     print(f"🚀 BAKE AI Scraper Started. Processing {len(places)} locations.")
 
