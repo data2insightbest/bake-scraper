@@ -92,7 +92,10 @@ def run_bake_scraper():
                 
                 # 4. UPSERT TO SUPABASE
                 # We capture the result to see if Supabase actually accepted it
-                result = supabase.table("events").upsert(event_data).execute()
+                # result = supabase.table("events").upsert(event_data).execute()
+                print(f"DEBUG: Inserting new row for {name}")
+                result = supabase.table("events").insert(event_data).execute()
+                print(f"DEBUG: Supabase result: {result.data}")
                 
                 if result.data:
                     print(f"✅ [{index+1}/{len(places)}] {name}: Saved '{ai_data['title']}' for {today_str}")
