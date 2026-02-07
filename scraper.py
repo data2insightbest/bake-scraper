@@ -4,15 +4,13 @@ import time
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-import google.generativeai as genai
+from google import genai  # UPDATED: New 2026 SDK
 from supabase import create_client
 
 # 1. Setup Connections
 supabase = create_client(os.environ["VITE_SUPABASE_URL"], os.environ["VITE_SUPABASE_KEY"])
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-
-# USE FLASH-LITE: Ideal for the higher token volume needed for 90-day extraction
-model = genai.GenerativeModel('gemini-2.0-flash-lite')
+# New Client structure for 2026
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -32,7 +30,7 @@ def run_bake_scraper():
     # Fetch museums
     places_res = supabase.table("places").select("*").execute()
     #places = places_res.data
-    places = places_res.data[:10] # Keeps your test limit of 5
+    places = places_res.data[:10] 
     
     print(f"🚀 BAKE AI Scraper Started. Mode: Hybrid Window (14/45/90 Days).")
 
@@ -50,10 +48,9 @@ def run_bake_scraper():
 
             # Step 2: Extract Text
             soup = BeautifulSoup(response.text, 'html.parser')
-            text_content = soup.get_text()[:6000] # Increased to find future events
+            text_content = soup.get_text()[:7000] # Slightly more context for better price extraction
 
-            # Step 3: AI Hybrid Window Processing
-            # We ask the AI to categorize based on its own reasoning of the event type
+            # Step 3: AI Hybrid Window Processing (UPDATED for Gemini 2.0)
             prompt = f"""
             Extract a list of upcoming kids events from this text for {name} in {zip_code}.
             Return ONLY a JSON list of objects.
@@ -63,12 +60,17 @@ def run_bake_scraper():
             - "event_date": YYYY-MM-DD
             - "category_name": One of [Science, Art, Outdoor, Play, Animals]
             - "window_type": Categorize as 'Daily' (recurring/small), 'Weekly' (mid-size), or 'Special' (festivals/large exhibits)
-            - "price_text": e.g., "Free" or "$15"
+            - "price_text": Extract the ACTUAL real price (e.g. "$12", "Free", "$5 kids/$10 adults"). Do not guess.
             - "snippet": 1 sentence description
             - "zip_code": "{zip_code}"
             """
             
-            ai_res = model.generate_content(prompt)
+            # Using the 2026 client.models syntax
+            ai_res = client.models.generate_content(
+                model='gemini-2.0-flash-lite',
+                contents=f"{prompt}\n\nText:\n{text_content}"
+            )
+            
             # Clean up the AI response to get pure JSON
             raw_json = ai_res.text.strip('`json\n ')
             events_list = json.loads(raw_json)
@@ -79,12 +81,13 @@ def run_bake_scraper():
 
             if isinstance(events_list, list):
                 for event in events_list:
-                    event_dt = datetime.strptime(event['event_date'], '%Y-%m-%d').date()
+                    # Validate date string format
+                    try:
+                        event_dt = datetime.strptime(event['event_date'], '%Y-%m-%d').date()
+                    except:
+                        continue
                     
-                    # Apply your window logic:
-                    # 1. Daily Refresh: Up to 14 days
-                    # 2. Weekly Deep Dive: Up to 45 days
-                    # 3. Special Scout: Up to 90 days
+                    # Window logic:
                     is_valid = False
                     if event['window_type'] == 'Daily' and event_dt <= (today + timedelta(days=14)):
                         is_valid = True
@@ -94,16 +97,17 @@ def run_bake_scraper():
                         is_valid = True
 
                     if is_valid:
-                        # Add place_id for database relations
                         event['place_id'] = place['id']
-                        supabase.table("events").insert(event, count="minimal").execute()
+                        # Ensure the zip code is exactly what was requested
+                        event['zip_code'] = zip_code
+                        supabase.table("events").insert(event).execute()
                         saved_count += 1
                 
                 print(f"✅ [{i+1}/{len(places)}] {name}: Saved {saved_count} window-matched events.")
             else:
                 print(f"ℹ️ [{i+1}/{len(places)}] {name}: No list returned from AI.")
 
-            # --- RPM SAFETY BUFFER ---
+            # RPM SAFETY
             time.sleep(10) 
 
         except Exception as e:
