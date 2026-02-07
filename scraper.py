@@ -13,9 +13,12 @@ supabase = create_client(os.environ["VITE_SUPABASE_URL"], os.environ["VITE_SUPAB
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.google.com/',
+    'DNT': '1', # Do Not Track
 }
-
 def cleanup_old_events():
     """Wipes out any records older than 2 days to keep Supabase under 500MB."""
     cutoff_date = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
