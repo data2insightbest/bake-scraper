@@ -32,7 +32,7 @@ def run_bake_scraper():
     # Fetch museums
     places_res = supabase.table("places").select("*").execute()
     #places = places_res.data
-    places = places_res.data[:5] # Keeps your test limit of 5
+    places = places_res.data[:10] # Keeps your test limit of 5
     
     print(f"🚀 BAKE AI Scraper Started. Mode: Hybrid Window (14/45/90 Days).")
 
