@@ -2,126 +2,95 @@ import os
 import json
 import time
 import requests
+import urllib.parse
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-from google import genai  # UPDATED: New 2026 SDK
+from google import genai
 from supabase import create_client
 
-# 1. Setup Connections
+# 1. Setup
 supabase = create_client(os.environ["VITE_SUPABASE_URL"], os.environ["VITE_SUPABASE_KEY"])
-# New Client structure for 2026
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': 'https://www.google.com/',
-    'DNT': '1', # Do Not Track
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Referer': 'https://www.google.com/'
 }
+
 def cleanup_old_events():
-    """Wipes out any records older than 2 days to keep Supabase under 500MB."""
-    cutoff_date = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
-    print(f"🧹 Database Maintenance: Deleting events before {cutoff_date}...")
+    """Removes events that happened before yesterday."""
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    print(f"🧹 Maintenance: Deleting events before {yesterday}...")
     try:
-        supabase.table("events").delete().lt("event_date", cutoff_date).execute()
-        print(f"✅ Cleanup successful.")
+        supabase.table("events").delete().lt("event_date", yesterday).execute()
+        print("✅ Cleanup complete.")
     except Exception as e:
-        print(f"⚠️ Cleanup skipped: {e}")
+        print(f"⚠️ Cleanup error: {e}")
 
 def run_bake_scraper():
     # Fetch museums
-    places_res = supabase.table("places").select("*").execute()
-    #places = places_res.data
-    places = places_res.data[:10] 
-    
-    print(f"🚀 BAKE AI Scraper Started. Mode: Hybrid Window (14/45/90 Days).")
+    places_res = supabase.table("places").select("*").execute()
+    #places = places_res.data
+    places = places_res.data[:10]
+    print(f"🚀 BAKE Scraper 2.0: Extracting Full Event Data...")
 
     for i, place in enumerate(places):
         name = place['name']
-        url = place['url']
-        zip_code = place.get('zip_code', '00000')
-        
+        url = place.get('url')
+        # Use existing zip or default if it's a generic search
+        place_zip = place.get('zip_code') or "94118" 
+
+        if not url:
+            search_query = f"{name} kids events {place_zip}"
+            url = f"https://www.google.com/search?q={urllib.parse.quote(search_query)}"
+            print(f"🔎 Generic: {name} in {place_zip}")
+
         try:
-            # Step 1: Fetch Website
-            response = requests.get(url, headers=HEADERS, timeout=15)
-            if response.status_code != 200:
-                print(f"    ⏩ Skipping {name}: Status {response.status_code}")
-                continue
+            res = requests.get(url, headers=HEADERS, timeout=15)
+            if res.status_code != 200: continue
 
-            # Step 2: Extract Text
-            soup = BeautifulSoup(response.text, 'html.parser')
-            text_content = soup.get_text()[:7000] # Slightly more context for better price extraction
+            text_content = BeautifulSoup(res.text, 'html.parser').get_text()[:7500]
 
-            # Step 3: AI Hybrid Window Processing (UPDATED for Gemini 2.0)
+            # Detailed Prompt for Full Data Extraction
             prompt = f"""
-            Extract a list of upcoming kids events from this text for {name} in {zip_code}.
-            Return ONLY a JSON list of objects.
-            
-            Each object MUST include:
-            - "title": Name of event
-            - "event_date": YYYY-MM-DD
+            Find all kids events for {name} in zip code {place_zip}.
+            Return a JSON list where each object has:
+            - "title": Title of the event
+            - "event_date": YYYY-MM-DD format
+            - "price_text": Exact price (e.g. "$15", "Free", or "Varies")
             - "category_name": One of [Science, Art, Outdoor, Play, Animals]
-            - "window_type": Categorize as 'Daily' (recurring/small), 'Weekly' (mid-size), or 'Special' (festivals/large exhibits)
-            - "price_text": Extract the ACTUAL real price (e.g. "$12", "Free", "$5 kids/$10 adults"). Do not guess.
-            - "snippet": 1 sentence description
-            - "zip_code": "{zip_code}"
+            - "window_type": One of [Daily, Weekly, Special]
+            - "zip_code": "{place_zip}"
+            - "snippet": Short 1-sentence description
             """
             
-            # Using the 2026 client.models syntax
             ai_res = client.models.generate_content(
                 model='gemini-2.0-flash-lite',
-                contents=f"{prompt}\n\nText:\n{text_content}"
+                contents=f"{prompt}\n\nContent:\n{text_content}"
             )
             
-            # Clean up the AI response to get pure JSON
-            raw_json = ai_res.text.strip('`json\n ')
-            events_list = json.loads(raw_json)
+            # Use JSON parsing with error handling
+            try:
+                events_list = json.loads(ai_res.text.strip('`json\n '))
+            except:
+                print(f"⚠️ Failed to parse AI JSON for {name}")
+                continue
 
-            # Step 4: Hybrid Filtering & Saving
-            today = datetime.now().date()
-            saved_count = 0
-
-            if isinstance(events_list, list):
+            if events_list:
                 for event in events_list:
-                    # Validate date string format
-                    try:
-                        event_dt = datetime.strptime(event['event_date'], '%Y-%m-%d').date()
-                    except:
-                        continue
-                    
-                    # Window logic:
-                    is_valid = False
-                    if event['window_type'] == 'Daily' and event_dt <= (today + timedelta(days=14)):
-                        is_valid = True
-                    elif event['window_type'] == 'Weekly' and event_dt <= (today + timedelta(days=45)):
-                        is_valid = True
-                    elif event['window_type'] == 'Special' and event_dt <= (today + timedelta(days=90)):
-                        is_valid = True
+                    event['place_id'] = place['id']
+                    # Bulk insert is more efficient
+                    supabase.table("events").insert(event).execute()
+                print(f"✅ [{i+1}] {name}: Added {len(events_list)} full events.")
 
-                    if is_valid:
-                        event['place_id'] = place['id']
-                        # Ensure the zip code is exactly what was requested
-                        event['zip_code'] = zip_code
-                        supabase.table("events").insert(event).execute()
-                        saved_count += 1
-                
-                print(f"✅ [{i+1}/{len(places)}] {name}: Saved {saved_count} window-matched events.")
-            else:
-                print(f"ℹ️ [{i+1}/{len(places)}] {name}: No list returned from AI.")
-
-            # RPM SAFETY
-            time.sleep(10) 
+            time.sleep(10) # Protect your API quota
 
         except Exception as e:
-            if "429" in str(e):
-                print("🛑 RPM LIMIT HIT: Stopping.")
-                break
             print(f"❌ Error at {name}: {e}")
 
-    # Final Step: Maintenance
     cleanup_old_events()
-    print("🏁 Hybrid Scrape Cycle Complete!")
+    print("🏁 All done!")
 
 if __name__ == "__main__":
     run_bake_scraper()
