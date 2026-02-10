@@ -67,7 +67,8 @@ def run_scraper():
     supabase.table("events").delete().lt("event_date", today).execute()
     
     # 2. Process venues
-    places = supabase.table("places").select("*").execute().data
+    places_res = supabase.table("places").select("*").execute()
+    places = places_res.data[:10]
     
     for venue in places:
         print(f"🔄 Scraping {venue['name']}...")
