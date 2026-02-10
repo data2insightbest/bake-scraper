@@ -72,12 +72,13 @@ def run_scraper():
             print(f"🔄 Scraping {venue['name']}...")
             page = context.new_page()
             try:
-                # Go to URL and wait for the network to be quiet
-                page.goto(venue['url'], wait_until="networkidle", timeout=60000)
+                # Optimized for speed and to avoid timeouts
+                page.goto(venue['url'], wait_until="domcontentloaded", timeout=45000)
+                time.sleep(5)
                 
-                # Scroll to bottom to trigger "Lazy Loading" (Fixes Home Depot 206)
+                # Scroll to reveal lazy-loaded content
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(3) # Wait for content to pop in
+                time.sleep(3) 
                 
                 html_content = page.content()
                 text = clean_html(html_content)
@@ -85,9 +86,12 @@ def run_scraper():
                 events = get_ai_extraction(text, venue)
                 
                 for event in events:
-                    event['place_id'] = int(venue['id']) 
+                    # NEW: Attaching both ID and Name for better app performance
+                    event['place_id'] = int(venue['id'])
+                    event['place_name'] = venue['name']
+                    
                     supabase.table("events").insert(event).execute()
-                    print(f"   ✨ Added: {event['title']}")
+                    print(f"   ✨ Added: {event['title']} at {venue['name']}")
                 
                 print(f"✅ Finished {venue['name']}.")
                 
