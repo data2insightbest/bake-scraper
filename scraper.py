@@ -1,37 +1,29 @@
 import os
 import time
 import json
-import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 from google import genai 
 from supabase import create_client
+from playwright.sync_api import sync_playwright
 
 # --- Setup ---
 supabase = create_client(os.environ['VITE_SUPABASE_URL'], os.environ['VITE_SUPABASE_KEY'])
-
 client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
-# Expanded headers to bypass 403/405 blocks
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': 'https://www.google.com/',
-    'DNT': '1',
-}
+# Standard headers for the browser context
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 def clean_html(raw_html):
-    """Strips HTML noise to save tokens and focus the AI."""
+    """Strips HTML noise to focus the AI."""
     soup = BeautifulSoup(raw_html, 'html.parser')
-    for element in soup(["script", "style", "footer", "nav", "header", "aside"]):
+    for element in soup(["script", "style", "footer", "nav", "header", "aside", "svg"]):
         element.decompose()
     return soup.get_text(separator=' ', strip=True)
 
 def get_ai_extraction(cleaned_text, venue):
-    """Uses Gemini 2.5 Flash-Lite (the current 2026 standard)."""
-    # Safety check for empty text (prevents AI Error: char 0)
-    if not cleaned_text or len(cleaned_text.strip()) < 100:
+    """Uses Gemini 2.5 Flash-Lite."""
+    if not cleaned_text or len(cleaned_text.strip()) < 200:
         return []
 
     prompt = f"""
@@ -52,57 +44,60 @@ def get_ai_extraction(cleaned_text, venue):
                 model='gemini-2.5-flash-lite',
                 contents=[prompt, cleaned_text[:18000]] 
             )
-            
             res_text = response.text.strip()
-            # Handle markdown wrapping
             clean_json = res_text.replace('```json', '').replace('```', '').strip()
             return json.loads(clean_json)
-            
         except Exception as e:
             if "429" in str(e):
-                delay = (attempt + 1) * 20 
-                print(f"⚠️ Rate limit. Backing off {delay}s...")
-                time.sleep(delay)
+                time.sleep((attempt + 1) * 20)
             else:
-                print(f"❌ AI Error: {e}")
                 return []
     return []
 
 def run_scraper():
-    # Start a session to handle cookies/persist identity (Fixes 403)
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
+    # 1. Database Cleanup
     today = datetime.now().strftime('%Y-%m-%d')
     print(f"🧹 Deleting events before {today}...")
     supabase.table("events").delete().lt("event_date", today).execute()
     
+    # 2. Get Places
     places = supabase.table("places").select("*").execute().data[:10]
     
-    for venue in places:
-        print(f"🔄 Scraping {venue['name']}...")
-        try:
-            # Slower delay to appear more human
-            time.sleep(8) 
-            res = session.get(venue['url'], timeout=20)
-            
-            if res.status_code == 200:
-                text = clean_html(res.text)
+    # 3. Launch Playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=USER_AGENT)
+        
+        for venue in places:
+            print(f"🔄 Scraping {venue['name']}...")
+            page = context.new_page()
+            try:
+                # Go to URL and wait for the network to be quiet
+                page.goto(venue['url'], wait_until="networkidle", timeout=60000)
+                
+                # Scroll to bottom to trigger "Lazy Loading" (Fixes Home Depot 206)
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                time.sleep(3) # Wait for content to pop in
+                
+                html_content = page.content()
+                text = clean_html(html_content)
+                
                 events = get_ai_extraction(text, venue)
                 
                 for event in events:
-                    # Note: Ensure events table place_id column is 'int8' not 'uuid'
                     event['place_id'] = int(venue['id']) 
                     supabase.table("events").insert(event).execute()
                     print(f"   ✨ Added: {event['title']}")
+                
                 print(f"✅ Finished {venue['name']}.")
-            else:
-                print(f"⏩ Skip {venue['name']}: HTTP {res.status_code}")
-            
-            time.sleep(10) 
-            
-        except Exception as e:
-            print(f"❌ Failed {venue['name']}: {e}")
+                
+            except Exception as e:
+                print(f"❌ Failed {venue['name']}: {e}")
+            finally:
+                page.close()
+                time.sleep(10) # Gemini RPM safety buffer
+
+        browser.close()
 
 if __name__ == "__main__":
     run_scraper()
