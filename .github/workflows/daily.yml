@@ -20,7 +20,12 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install google-genai supabase beautifulsoup4 requests
+          python -m pip install --upgrade pip
+          pip install google-genai supabase beautifulsoup4 requests playwright
+
+      - name: Install Playwright Browsers
+        # --with-deps is essential for Ubuntu runners to install Linux graphics libraries
+        run: playwright install chromium --with-deps
 
       - name: Run BAKE Scraper
         env:
