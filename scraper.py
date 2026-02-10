@@ -10,12 +10,15 @@ from supabase import create_client
 # --- Setup ---
 supabase = create_client(os.environ['VITE_SUPABASE_URL'], os.environ['VITE_SUPABASE_KEY'])
 
-# Initialize the client (v1 is now standard for 2.5/3.0 models)
 client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
+# Expanded headers to bypass 403/405 blocks
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.google.com/',
+    'DNT': '1',
 }
 
 def clean_html(raw_html):
@@ -27,6 +30,10 @@ def clean_html(raw_html):
 
 def get_ai_extraction(cleaned_text, venue):
     """Uses Gemini 2.5 Flash-Lite (the current 2026 standard)."""
+    # Safety check for empty text (prevents AI Error: char 0)
+    if not cleaned_text or len(cleaned_text.strip()) < 100:
+        return []
+
     prompt = f"""
     Find upcoming kids events for {venue['name']} (Zip: {venue['zip_code']}).
     Output a JSON list with:
@@ -41,13 +48,14 @@ def get_ai_extraction(cleaned_text, venue):
     
     for attempt in range(3):
         try:
-            # SWITCHED TO: gemini-2.5-flash-lite (Stable)
             response = client.models.generate_content(
                 model='gemini-2.5-flash-lite',
-                contents=[prompt, cleaned_text[:18000]] # Slightly larger window allowed
+                contents=[prompt, cleaned_text[:18000]] 
             )
             
-            clean_json = response.text.replace('```json', '').replace('```', '').strip()
+            res_text = response.text.strip()
+            # Handle markdown wrapping
+            clean_json = res_text.replace('```json', '').replace('```', '').strip()
             return json.loads(clean_json)
             
         except Exception as e:
@@ -61,34 +69,37 @@ def get_ai_extraction(cleaned_text, venue):
     return []
 
 def run_scraper():
-    # 1. Clean data (Keep it fresh)
+    # Start a session to handle cookies/persist identity (Fixes 403)
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
     today = datetime.now().strftime('%Y-%m-%d')
     print(f"🧹 Deleting events before {today}...")
     supabase.table("events").delete().lt("event_date", today).execute()
     
-    # 2. Process first 10 places
     places = supabase.table("places").select("*").execute().data[:10]
     
     for venue in places:
         print(f"🔄 Scraping {venue['name']}...")
         try:
-            time.sleep(5) 
-            res = requests.get(venue['url'], headers=HEADERS, timeout=15)
+            # Slower delay to appear more human
+            time.sleep(8) 
+            res = session.get(venue['url'], timeout=20)
             
             if res.status_code == 200:
                 text = clean_html(res.text)
                 events = get_ai_extraction(text, venue)
                 
                 for event in events:
-                    event['place_id'] = venue['id']
+                    # Note: Ensure events table place_id column is 'int8' not 'uuid'
+                    event['place_id'] = int(venue['id']) 
                     supabase.table("events").insert(event).execute()
                     print(f"   ✨ Added: {event['title']}")
                 print(f"✅ Finished {venue['name']}.")
             else:
                 print(f"⏩ Skip {venue['name']}: HTTP {res.status_code}")
             
-            # 12s buffer to stay under 5 RPM
-            time.sleep(12) 
+            time.sleep(10) 
             
         except Exception as e:
             print(f"❌ Failed {venue['name']}: {e}")
