@@ -4,12 +4,17 @@ import json
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
-from google import genai  # Newer Unified SDK
+from google import genai 
 from supabase import create_client
 
 # --- Setup ---
 supabase = create_client(os.environ['VITE_SUPABASE_URL'], os.environ['VITE_SUPABASE_KEY'])
-client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
+
+# Use v1beta for preview models to ensure compatibility
+client = genai.Client(
+    api_key=os.environ['GEMINI_API_KEY'],
+    http_options={'api_version': 'v1beta'}
+)
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -18,17 +23,15 @@ HEADERS = {
 }
 
 def clean_html(raw_html):
-    """Strips HTML junk to reduce token usage and noise."""
     soup = BeautifulSoup(raw_html, 'html.parser')
     for element in soup(["script", "style", "footer", "nav", "header", "aside"]):
         element.decompose()
     return soup.get_text(separator=' ', strip=True)
 
 def get_ai_extraction(cleaned_text, venue):
-    """Uses new google-genai client with exponential backoff."""
     prompt = f"""
-    Find upcoming kids events for {venue['name']} (Zip: {venue['zip_code']}).
-    Output a JSON list with these keys:
+    Extract kids events for {venue['name']} (Zip: {venue['zip_code']}).
+    Return ONLY a JSON list:
     - "title": Event name
     - "event_date": YYYY-MM-DD
     - "category_name": [Science, Art, Outdoor, Play, Animals]
@@ -40,21 +43,19 @@ def get_ai_extraction(cleaned_text, venue):
     
     for attempt in range(3):
         try:
-            # New SDK syntax: client.models.generate_content
+            # The most reliable ID for the 2.0 Lite Preview right now
             response = client.models.generate_content(
-                model='gemini-1.5-flash',
+                model='gemini-2.0-flash-lite-preview-02-05',
                 contents=[prompt, cleaned_text[:15000]]
             )
             
-            # Extract text and clean potential markdown
-            raw_text = response.text
-            clean_json = raw_text.replace('```json', '').replace('```', '').strip()
+            clean_json = response.text.replace('```json', '').replace('```', '').strip()
             return json.loads(clean_json)
             
         except Exception as e:
             if "429" in str(e):
                 delay = (attempt + 1) * 20 
-                print(f"⚠️ Rate limit hit. Backing off for {delay}s...")
+                print(f"⚠️ Rate limit. Waiting {delay}s...")
                 time.sleep(delay)
             else:
                 print(f"❌ AI Error: {e}")
@@ -62,18 +63,16 @@ def get_ai_extraction(cleaned_text, venue):
     return []
 
 def run_scraper():
-    # 1. Clean old data
     today = datetime.now().strftime('%Y-%m-%d')
+    print(f"🧹 Cleaning events before {today}...")
     supabase.table("events").delete().lt("event_date", today).execute()
     
-    # 2. Process venues
-    places_res = supabase.table("places").select("*").execute()
-    places = places_res.data[:10]
+    places = supabase.table("places").select("*").execute().data[:10]
     
     for venue in places:
         print(f"🔄 Scraping {venue['name']}...")
         try:
-            time.sleep(5) # Respect website
+            time.sleep(5) 
             res = requests.get(venue['url'], headers=HEADERS, timeout=15)
             
             if res.status_code == 200:
@@ -81,15 +80,13 @@ def run_scraper():
                 events = get_ai_extraction(text, venue)
                 
                 for event in events:
-                    event['place_id'] = venue['id'] # Link to place
+                    event['place_id'] = venue['id']
                     supabase.table("events").insert(event).execute()
                     print(f"   ✨ Added: {event['title']}")
-                
                 print(f"✅ Finished {venue['name']}.")
             else:
                 print(f"⏩ Skip {venue['name']}: HTTP {res.status_code}")
             
-            # 12s pause keeps you under 5 requests per minute
             time.sleep(12) 
             
         except Exception as e:
@@ -97,5 +94,4 @@ def run_scraper():
 
 if __name__ == "__main__":
     run_scraper()
-    print("🏁 All venues processed.")
     
