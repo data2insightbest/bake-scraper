@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import re  # Added for date validation
 from bs4 import BeautifulSoup
 from datetime import datetime
 from google import genai 
@@ -11,18 +12,20 @@ from playwright.sync_api import sync_playwright
 supabase = create_client(os.environ['VITE_SUPABASE_URL'], os.environ['VITE_SUPABASE_KEY'])
 client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
-# Standard headers for the browser context
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 def clean_html(raw_html):
-    """Strips HTML noise to focus the AI."""
     soup = BeautifulSoup(raw_html, 'html.parser')
     for element in soup(["script", "style", "footer", "nav", "header", "aside", "svg"]):
         element.decompose()
     return soup.get_text(separator=' ', strip=True)
 
+# --- NEW: Date Validator ---
+def is_valid_date(date_str):
+    """Returns True if string is exactly YYYY-MM-DD, False otherwise."""
+    return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
+
 def get_ai_extraction(cleaned_text, venue):
-    """Uses Gemini 2.5 Flash-Lite."""
     if not cleaned_text or len(cleaned_text.strip()) < 200:
         return []
 
@@ -30,7 +33,7 @@ def get_ai_extraction(cleaned_text, venue):
     Find upcoming kids events for {venue['name']} (Zip: {venue['zip_code']}).
     Output a JSON list with:
     - "title": Event name
-    - "event_date": YYYY-MM-DD
+    - "event_date": YYYY-MM-DD (If date is not found, exclude the event)
     - "category_name": [Science, Art, Outdoor, Play, Animals]
     - "window_type": ['Daily', 'Weekly', 'Special']
     - "price_text": e.g. "$15" or "Free"
@@ -55,15 +58,12 @@ def get_ai_extraction(cleaned_text, venue):
     return []
 
 def run_scraper():
-    # 1. Database Cleanup
     today = datetime.now().strftime('%Y-%m-%d')
     print(f"🧹 Deleting events before {today}...")
     supabase.table("events").delete().lt("event_date", today).execute()
     
-    # 2. Get Places
     places = supabase.table("places").select("*").execute().data[:10]
     
-    # 3. Launch Playwright
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=USER_AGENT)
@@ -72,11 +72,9 @@ def run_scraper():
             print(f"🔄 Scraping {venue['name']}...")
             page = context.new_page()
             try:
-                # Optimized for speed and to avoid timeouts
                 page.goto(venue['url'], wait_until="domcontentloaded", timeout=45000)
                 time.sleep(5)
                 
-                # Scroll to reveal lazy-loaded content
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 time.sleep(3) 
                 
@@ -86,12 +84,17 @@ def run_scraper():
                 events = get_ai_extraction(text, venue)
                 
                 for event in events:
-                    # NEW: Attaching both ID and Name for better app performance
-                    event['place_id'] = int(venue['id'])
-                    event['place_name'] = venue['name']
-                    
-                    supabase.table("events").insert(event).execute()
-                    print(f"   ✨ Added: {event['title']} at {venue['name']}")
+                    # --- VALIDATION CHECK ---
+                    # Only insert if the date is in the correct format
+                    if is_valid_date(event.get('event_date')):
+                        event['place_id'] = int(venue['id'])
+                        event['place_name'] = venue['name'] 
+                        
+                        supabase.table("events").insert(event).execute()
+                        print(f"   ✨ Added: {event['title']} at {venue['name']}")
+                    else:
+                        # This skips the "Not specified" errors silently
+                        print(f"   ⏩ Skipped '{event.get('title')}' - invalid date format: {event.get('event_date')}")
                 
                 print(f"✅ Finished {venue['name']}.")
                 
@@ -99,7 +102,7 @@ def run_scraper():
                 print(f"❌ Failed {venue['name']}: {e}")
             finally:
                 page.close()
-                time.sleep(10) # Gemini RPM safety buffer
+                time.sleep(10)
 
         browser.close()
 
