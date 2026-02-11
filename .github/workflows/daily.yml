@@ -1,10 +1,10 @@
 name: BAKE Daily Scraper
 
-on:
-  schedule:
+#on:
+ # schedule:
     # Runs at 13:00 UTC (5:00 AM PT) every day
-    - cron: '0 13 * * *'
-  workflow_dispatch: # Allows you to click "Run workflow" manually for testing
+  #  - cron: '0 13 * * *'
+  #workflow_dispatch: # Allows you to click "Run workflow" manually for testing
 
 jobs:
   scrape_job:
