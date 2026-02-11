@@ -1,7 +1,7 @@
 import os
 import time
 import json
-import re  # Added for date validation
+import re
 from bs4 import BeautifulSoup
 from datetime import datetime
 from google import genai 
@@ -20,25 +20,34 @@ def clean_html(raw_html):
         element.decompose()
     return soup.get_text(separator=' ', strip=True)
 
-# --- NEW: Date Validator ---
 def is_valid_date(date_str):
-    """Returns True if string is exactly YYYY-MM-DD, False otherwise."""
+    """Ensures the date is a real YYYY-MM-DD string."""
     return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
 
 def get_ai_extraction(cleaned_text, venue):
     if not cleaned_text or len(cleaned_text.strip()) < 200:
         return []
 
+    # FIX: Tell the AI exactly what year it is so it doesn't return XXXX
+    today_str = datetime.now().strftime('%B %d, %Y')
+
     prompt = f"""
+    Today is {today_str}. 
     Find upcoming kids events for {venue['name']} (Zip: {venue['zip_code']}).
+    
     Output a JSON list with:
     - "title": Event name
-    - "event_date": YYYY-MM-DD (If date is not found, exclude the event)
+    - "event_date": YYYY-MM-DD (Use 2026 for the year unless stated otherwise)
     - "category_name": [Science, Art, Outdoor, Play, Animals]
     - "window_type": ['Daily', 'Weekly', 'Special']
     - "price_text": e.g. "$15" or "Free"
     - "snippet": 1 sentence summary
     - "zip_code": "{venue['zip_code']}"
+
+    Rules:
+    1. EXCLUDE events if you cannot find a specific day/month.
+    2. EXCLUDE "Adults Only" or "21+" events.
+    3. Ensure event_date is a valid YYYY-MM-DD.
     """
     
     for attempt in range(3):
@@ -62,7 +71,8 @@ def run_scraper():
     print(f"🧹 Deleting events before {today}...")
     supabase.table("events").delete().lt("event_date", today).execute()
     
-    places = supabase.table("places").select("*").execute().data[:10]
+    # Process all places in the table
+    places = supabase.table("places").select("*").execute().data
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -84,17 +94,17 @@ def run_scraper():
                 events = get_ai_extraction(text, venue)
                 
                 for event in events:
-                    # --- VALIDATION CHECK ---
-                    # Only insert if the date is in the correct format
                     if is_valid_date(event.get('event_date')):
+                        # DATA MAPPING:
+                        # 1. Map 'id' to 'place_id'
                         event['place_id'] = int(venue['id'])
+                        # 2. Map venue 'name' to 'place_name' in the events table
                         event['place_name'] = venue['name'] 
                         
                         supabase.table("events").insert(event).execute()
                         print(f"   ✨ Added: {event['title']} at {venue['name']}")
                     else:
-                        # This skips the "Not specified" errors silently
-                        print(f"   ⏩ Skipped '{event.get('title')}' - invalid date format: {event.get('event_date')}")
+                        print(f"   ⏩ Skipped '{event.get('title')}' - invalid date: {event.get('event_date')}")
                 
                 print(f"✅ Finished {venue['name']}.")
                 
