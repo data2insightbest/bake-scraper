@@ -3,7 +3,7 @@ import time
 import json
 import re
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from google import genai 
 from supabase import create_client
 from playwright.sync_api import sync_playwright
@@ -15,10 +15,11 @@ client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 # --- Config ---
-TEST_WORKSHOPS_ONLY = True  # Set to False to run the full library/store list
+# Set to False to run the full library/store list
+TEST_WORKSHOPS_ONLY = True  
 
 def clean_html(raw_html):
-    soup = BeautifulSoup(raw_html, 'html.parser')
+    soup = BeautifulSoup(raw_html, 'parser.html')
     for element in soup(["script", "style", "footer", "nav", "header", "aside", "svg"]):
         element.decompose()
     return soup.get_text(separator=' ', strip=True)
@@ -43,7 +44,7 @@ def get_ai_extraction(cleaned_text, venue):
     - "window_type": ['Daily', 'Weekly', 'Special']
     - "price_text": e.g. "$15" or "Free"
     - "snippet": 1 sentence summary
-    - "found_location": The specific branch or city name mentioned for this event (e.g., 'Belmont', 'Pacific', 'Foster City'). If it's a general event for all locations, put 'All'.
+    - "found_location": The specific branch or city name mentioned (e.g., 'Belmont'). If general for all locations, put 'All'.
 
     Rules:
     1. EXCLUDE events without a specific day/month.
@@ -68,9 +69,7 @@ def get_ai_extraction(cleaned_text, venue):
     return []
 
 def save_event_to_supabase(event_data, branch):
-    """Formats and inserts a single event record."""
     entry = event_data.copy()
-    # Remove the helper field before saving
     entry.pop('found_location', None)
     
     entry['place_id'] = int(branch['id'])
@@ -81,15 +80,19 @@ def save_event_to_supabase(event_data, branch):
     print(f"   ✨ Added: {entry['title']} to {branch['name']} ({branch['zip_code']})")
 
 def run_scraper():
-    today = datetime.now().strftime('%Y-%m-%d')
-    print(f"🧹 Deleting events before {today}...")
-    supabase.table("events").delete().lt("event_date", today).execute()
+    # Generate a timestamp for 12:00:00 AM today
+    midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
+    
+    print(f"🧹 Deleting all events occurring before {midnight_today}...")
+    # This removes anything with a timestamp/date before the start of today
+    supabase.table("events").delete().lt("event_date", midnight_today).execute()
     
     # Query for Master locations
     query = supabase.table("places").select("*").eq("is_master", True)
+    
     if TEST_WORKSHOPS_ONLY:
-        print("🛠️ Test Mode: Workshop logic only...")
-        query = query.ilike("name", "%workshop%")
+        print("🛠️ Test Mode: Filtering by 'Workshop' category...")
+        query = query.eq("category", "Workshop")
     
     masters = query.execute().data
     
@@ -102,13 +105,12 @@ def run_scraper():
             page = context.new_page()
             try:
                 page.goto(m['url'], wait_until="domcontentloaded", timeout=45000)
-                time.sleep(5)
+                time.sleep(10) 
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 
                 text = clean_html(page.content())
                 events = get_ai_extraction(text, m)
                 
-                # Fetch all branches belonging to this master
                 branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
                 
                 for ev in events:
@@ -117,16 +119,12 @@ def run_scraper():
 
                     loc = str(ev.get('found_location', '')).lower()
                     
-                    # LOGIC 1: Blanket Duplication (Workshops/Franchises)
                     if loc == 'all' or m['category'] == 'Workshop':
                         for b in branches:
                             save_event_to_supabase(ev, b)
-                    
-                    # LOGIC 2: Branch Matching (Libraries/Specific Stores)
                     else:
                         matched = False
                         for b in branches:
-                            # Search for branch name (e.g., 'Belmont') in the AI's 'found_location'
                             branch_keyword = b['name'].lower().replace("library", "").strip()
                             if branch_keyword in loc or branch_keyword in ev['title'].lower():
                                 save_event_to_supabase(ev, b)
@@ -134,7 +132,7 @@ def run_scraper():
                                 break
                         
                         if not matched:
-                            print(f"   ⏩ Skipped: {ev['title']} (No matching branch found for '{loc}')")
+                            print(f"   ⏩ Skipped: {ev['title']} (No branch match for '{loc}')")
                 
             except Exception as e:
                 print(f"❌ Error at {m['name']}: {e}")
@@ -146,3 +144,4 @@ def run_scraper():
 
 if __name__ == "__main__":
     run_scraper()
+    
