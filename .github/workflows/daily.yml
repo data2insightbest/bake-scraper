@@ -2,9 +2,9 @@ name: BAKE Daily Scraper
 
 on:
   schedule:
-    # Runs at 13:00 UTC (5:00 AM PT) every day
+    # Runs at 13:00 UTC (5:00 AM PT / 6:00 AM PDT) every day
     - cron: '0 13 * * *'
-  workflow_dispatch: # Allows you to click "Run workflow" manually for testing
+  workflow_dispatch: # Allows manual testing in the "Actions" tab
 
 jobs:
   scrape_job:
@@ -16,22 +16,20 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12' # Using 3.12 for better 2026 compatibility
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install google-genai supabase beautifulsoup4 requests playwright
 
-      - name: Install Playwright Browsers
-        # --with-deps is essential for Ubuntu runners to install Linux graphics libraries
-        run: playwright install chromium --with-deps
+      - name: Install Playwright Chromium
+        # 'install --with-deps' is the magic line that prevents "Executable not found" errors
+        run: npx playwright install chromium --with-deps
 
       - name: Run BAKE Scraper
         env:
-          # This "maps" your hidden GitHub Secrets to the Python script
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_KEY: ${{ secrets.VITE_SUPABASE_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python scraper.py
-        
