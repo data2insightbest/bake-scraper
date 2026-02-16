@@ -19,7 +19,7 @@ USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 TEST_WORKSHOPS_ONLY = True  
 
 def clean_html(raw_html):
-    soup = BeautifulSoup(raw_html, 'parser.html')
+    soup = BeautifulSoup(raw_html, 'html.parser')
     for element in soup(["script", "style", "footer", "nav", "header", "aside", "svg"]):
         element.decompose()
     return soup.get_text(separator=' ', strip=True)
@@ -44,7 +44,7 @@ def get_ai_extraction(cleaned_text, venue):
     - "window_type": ['Daily', 'Weekly', 'Special']
     - "price_text": e.g. "$15" or "Free"
     - "snippet": 1 sentence summary
-    - "found_location": The specific branch or city name mentioned (e.g., 'Belmont'). If general for all locations, put 'All'.
+    - "found_location": The specific branch/city name mentioned. If general for all locations, put 'All'.
 
     Rules:
     1. EXCLUDE events without a specific day/month.
@@ -80,21 +80,24 @@ def save_event_to_supabase(event_data, branch):
     print(f"   ✨ Added: {entry['title']} to {branch['name']} ({branch['zip_code']})")
 
 def run_scraper():
-    # Generate a timestamp for 12:00:00 AM today
+    # Target 12:00:00 AM of today
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
     
-    print(f"🧹 Deleting all events occurring before {midnight_today}...")
-    # This removes anything with a timestamp/date before the start of today
+    # This will delete everything from Feb 10, 11, etc.
+    print(f"🧹 Deleting all events strictly before {midnight_today}...")
     supabase.table("events").delete().lt("event_date", midnight_today).execute()
     
     # Query for Master locations
     query = supabase.table("places").select("*").eq("is_master", True)
     
     if TEST_WORKSHOPS_ONLY:
-        print("🛠️ Test Mode: Filtering by 'Workshop' category...")
-        query = query.eq("category", "Workshop")
+        # UPDATED: Matching your exact category string
+        target_cat = "Workshop and Hands on Experience"
+        print(f"🛠️ Test Mode: Filtering by category '{target_cat}'...")
+        query = query.eq("category", target_cat)
     
     masters = query.execute().data
+    print(f"🔎 Found {len(masters)} master records to scrape.")
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -112,6 +115,7 @@ def run_scraper():
                 events = get_ai_extraction(text, m)
                 
                 branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
+                print(f"   📍 Found {len(branches)} branches for this master.")
                 
                 for ev in events:
                     if not is_valid_date(ev.get('event_date')):
@@ -119,9 +123,11 @@ def run_scraper():
 
                     loc = str(ev.get('found_location', '')).lower()
                     
-                    if loc == 'all' or m['category'] == 'Workshop':
+                    # Logic for Workshops (Duplicate to all branches)
+                    if loc == 'all' or "workshop" in m['category'].lower():
                         for b in branches:
                             save_event_to_supabase(ev, b)
+                    # Logic for Libraries (Match specific branch)
                     else:
                         matched = False
                         for b in branches:
@@ -144,4 +150,3 @@ def run_scraper():
 
 if __name__ == "__main__":
     run_scraper()
-    
