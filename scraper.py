@@ -33,8 +33,8 @@ def get_ai_extraction(cleaned_text, venue):
     today_str = datetime.now().strftime('%B %d, %Y')
     prompt = f"""
     Today is {today_str}. Find upcoming kids events for {venue['name']}.
-    Output a JSON list with: "title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location".
-    Rules: Use 2026 for year. EXCLUDE if no date. EXCLUDE adults-only.
+    Output a JSON list with: "title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location".
+    Rules: Use 2026 for year. EXCLUDE if no date.
     """
     
     for attempt in range(3):
@@ -45,13 +45,15 @@ def get_ai_extraction(cleaned_text, venue):
             )
             res_text = response.text.strip().replace('```json', '').replace('```', '').strip()
             return json.loads(res_text)
-        except Exception as e:
+        except Exception:
             time.sleep(20)
     return []
 
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    print(f"🧹 Deleting events before {midnight_today}...")
+    
+    # 1. Global Cleanup (Deletes old history)
+    print(f"🧹 Clearing history before {midnight_today}...")
     supabase.table("events").delete().lt("event_date", midnight_today).execute()
     
     target_cat = "Workshop and Hands on Experience"
@@ -66,45 +68,50 @@ def run_scraper():
         context = browser.new_context(user_agent=USER_AGENT)
         
         for m in masters:
-            # FIX 1: URL Validation
-            raw_url = m['url']
-            final_url = raw_url if raw_url.startswith('http') else f'https://{raw_url}'
+            # URL Check
+            final_url = m['url'] if m['url'].startswith('http') else f'https://{m['url']}'
+            print(f"🔄 Processing Master: {m['name']}...")
             
-            print(f"🔄 Processing: {m['name']} at {final_url}")
+            # Fetch branches early for cleanup
+            branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
+            branch_ids = [int(b['id']) for b in branches]
+
+            # 2. TARGETED CLEANUP: Wipe today/future events for THESE branches before re-adding
+            if branch_ids:
+                print(f"   🗑️ Refreshing data for {len(branch_ids)} branches...")
+                supabase.table("events").delete().in_("place_id", branch_ids).gte("event_date", midnight_today).execute()
+
             page = context.new_page()
-            
-            # Tracking set to prevent double-adding in the same run
-            processed_keys = set()
-            
             try:
                 page.goto(final_url, wait_until="networkidle", timeout=60000)
                 time.sleep(10) 
                 
                 text = clean_html(page.content())
                 events = get_ai_extraction(text, m)
-                branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
                 
+                # Internal de-duplication for the current page scrape
+                seen_this_loop = set()
+
                 for ev in events:
                     if not is_valid_date(ev.get('event_date')):
                         continue
-                    
-                    loc = str(ev.get('found_location', '')).lower()
-                    
-                    # Logic for distribution
+
+                    loc_hint = str(ev.get('found_location', '')).lower()
                     targets = []
-                    if loc == 'all' or "workshop" in m['category'].lower():
+                    
+                    # Workshop logic vs Library logic
+                    if loc_hint == 'all' or "workshop" in m['category'].lower():
                         targets = branches
                     else:
                         for b in branches:
-                            keyword = b['name'].lower().replace("library", "").strip()
-                            if keyword in loc or keyword in ev['title'].lower():
+                            b_clean = b['name'].lower().replace("library", "").strip()
+                            if b_clean in loc_hint or b_clean in ev['title'].lower():
                                 targets = [b]
                                 break
-
+                    
                     for branch in targets:
-                        # FIX 2: De-duplication Logic
                         unique_key = f"{ev['title']}-{ev['event_date']}-{branch['id']}"
-                        if unique_key not in processed_keys:
+                        if unique_key not in seen_this_loop:
                             entry = ev.copy()
                             entry.pop('found_location', None)
                             entry.update({
@@ -113,9 +120,9 @@ def run_scraper():
                                 'zip_code': branch['zip_code']
                             })
                             supabase.table("events").insert(entry).execute()
-                            processed_keys.add(unique_key)
+                            seen_this_loop.add(unique_key)
                             print(f"   ✨ Added: {ev['title']} to {branch['name']}")
-
+                
             except Exception as e:
                 print(f"❌ Error at {m['name']}: {e}")
             finally:
@@ -124,3 +131,4 @@ def run_scraper():
 
 if __name__ == "__main__":
     run_scraper()
+    
