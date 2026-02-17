@@ -40,37 +40,44 @@ def get_ai_extraction(cleaned_text, venue_name):
         return []
 
 def scroll_to_sections(page):
-    """Scrolls down slowly in human-like chunks to trigger lazy-loaded sections."""
-    for i in range(8):
-        # Move in smaller, slightly randomized steps
+    """Deep human-like scroll to trigger lazy-loaded Workshop grids."""
+    for i in range(10): # Increased depth for 2026 site layouts
         scroll_amount = random.randint(700, 1100)
         page.mouse.wheel(0, scroll_amount)
-        time.sleep(random.uniform(1.0, 2.0))
+        time.sleep(random.uniform(1.0, 1.8))
 
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
+    # Initial cleanup
     supabase.table("events").delete().lt("event_date", midnight_today).execute()
     
     masters = supabase.table("places").select("*").eq("is_master", True).execute().data
     
     with sync_playwright() as p:
+        # Launching with specific arguments to reduce bot detection
         browser = p.chromium.launch(headless=True)
-        # Use a persistent context style with stealth scripts
-        context = browser.new_context(user_agent=USER_AGENT, viewport={'width': 1920, 'height': 1080})
+        context = browser.new_context(
+            user_agent=USER_AGENT, 
+            viewport={'width': 1920, 'height': 1080}
+        )
         
-        # --- NEW STEALTH PROTECTION ---
-        # This prevents Home Depot and Lowe's from seeing the 'WebDriver' bot flag
+        # KEY FIX: This script hides the 'automated' flag that blocks Home Depot/Lowe's
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
         for m in masters:
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches: continue
             
+            # --- PATHWAY A: Global (Home Depot, Lowe's) ---
             if any(x in m['name'].lower() for x in ["home depot", "lowe's"]):
                 scrape_and_save(context, m, branches, mode="global", midnight=midnight_today)
+
+            # --- PATHWAY B: Specific (Lego, Barnes & Noble, Slime Kitchen) ---
             elif any(x in m['name'].lower() for x in ["lego", "barnes", "slime"]):
                 for branch in branches:
                     scrape_and_save(context, m, [branch], mode="specific", midnight=midnight_today, zip_code=branch['zip_code'])
+
+            # --- PATHWAY C: Libraries (Mapping) ---
             elif "library" in m['name'].lower():
                 scrape_and_save(context, m, branches, mode="mapping", midnight=midnight_today)
 
@@ -81,15 +88,16 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
     try:
-        # Use networkidle to ensure heavy retail tracking scripts finish
+        # 'networkidle' is critical for Home Depot to finish loading its internal API
         page.goto(url, wait_until="networkidle", timeout=90000)
         
-        # --- FIXED: Lowe's now included in the scroll logic ---
+        # Scroll for the big retailers and B&N
         if mode == "global" or (mode == "specific" and "barnes" in master['name'].lower()):
+            print(f"🕵️ Deep scanning {master['name']}...")
             scroll_to_sections(page)
-            # Give it one final beat to render the workshop grid
-            time.sleep(2)
-        
+            time.sleep(4) # Wait for the grid to finish 'painting' after scroll
+
+        # Zip Interaction for Lego/Slime
         if mode == "specific" and zip_code:
             try:
                 search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i], input[name*='store' i]").first
@@ -105,13 +113,16 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
         events = get_ai_extraction(text, master['name'])
         
         if events:
+            # Refresh local data
             b_ids = [int(b['id']) for b in target_branches]
             supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
 
             for ev in events:
                 if not is_valid_date(ev.get('event_date')): continue
+                
                 for branch in target_branches:
                     should_add = (mode in ["global", "specific"])
+                    
                     if mode == "mapping":
                         loc_hint = str(ev.get('found_location', '')).lower()
                         b_clean = branch['name'].lower().replace("library", "").strip()
@@ -128,6 +139,8 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
                         })
                         supabase.table("events").insert(entry).execute()
                         print(f"   ✨ {master['name']} -> {branch['name']}: {ev['title']}")
+        elif mode == "global":
+            print(f"   ⚠️ No events found for {master['name']}. Structure might have changed.")
                         
     except Exception as e:
         print(f"❌ Error at {master['name']}: {e}")
