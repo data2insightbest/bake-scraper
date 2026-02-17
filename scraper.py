@@ -5,7 +5,7 @@ import re
 import random
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, time as dt_time
+from datetime import datetime, timedelta, time as dt_time
 from google import genai 
 from supabase import create_client
 from playwright.sync_api import sync_playwright
@@ -14,8 +14,57 @@ from playwright.sync_api import sync_playwright
 supabase = create_client(os.environ['VITE_SUPABASE_URL'], os.environ['VITE_SUPABASE_KEY'])
 client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
-# 2026 Stable Headers
 MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+
+# --- Hybrid Step 1: The Project Bank ---
+PROJECT_BANK = {
+    "home depot": {
+        "2026-02-07": "Kids Workshop: Penguin Mailbox",
+        "2026-03-07": "Kids Workshop: Leprechaun Trap",
+        "2026-04-04": "Kids Workshop: Farm Planter"
+    },
+    "lowe's": {
+        "2026-02-21": "Lowe's Kids Club: Birdhouse",
+        "2026-03-21": "Lowe's Kids Club: Lawn Mower",
+        "2026-04-18": "Lowe's Kids Club: Terrarium"
+    }
+}
+
+def get_hybrid_retail_events(venue_name):
+    """Hybrid Logic: Checks Project Bank first, then calculates dates perpetually."""
+    events = []
+    today = datetime.now()
+    name_key = "home depot" if "home depot" in venue_name.lower() else "lowe's"
+    
+    # Generate for this month and next 2 months
+    for i in range(3):
+        year = today.year + (today.month + i - 1) // 12
+        month = (today.month + i - 1) % 12 + 1
+        first_day = datetime(year, month, 1)
+        
+        # Find 1st Saturday
+        days_to_sat = (5 - first_day.weekday() + 7) % 7
+        target_date = first_day + timedelta(days=days_to_sat)
+        
+        # Lowe's is 3rd Saturday
+        if name_key == "lowe's":
+            target_date = target_date + timedelta(weeks=2)
+        
+        date_str = target_date.strftime('%Y-%m-%d')
+        
+        if target_date.date() >= today.date():
+            # Step 1: Check Bank | Step 2: Use Generic
+            title = PROJECT_BANK.get(name_key, {}).get(date_str, f"{venue_name} Kids Workshop")
+            
+            events.append({
+                "title": title,
+                "event_date": date_str,
+                "category_name": "Workshop",
+                "window_type": "Morning",
+                "price_text": "Free",
+                "snippet": f"Free hands-on building event at {venue_name}. Materials provided."
+            })
+    return events
 
 def clean_html(raw_html):
     soup = BeautifulSoup(raw_html, 'html.parser')
@@ -25,37 +74,6 @@ def clean_html(raw_html):
 
 def is_valid_date(date_str):
     return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
-
-def get_hardcoded_retail_events(venue_name):
-    """Fallback for 2026 Workshop Schedules when scrapers are blocked."""
-    # Home Depot: 1st Saturday | Lowe's: 3rd Saturday
-    today = datetime.now()
-    if "home depot" in venue_name.lower():
-        return [{
-            "title": "Kids Workshop: Penguin Mailbox",
-            "event_date": "2026-02-07",
-            "category_name": "Workshop",
-            "window_type": "Morning",
-            "price_text": "Free",
-            "snippet": "Build a wooden penguin mailbox! All tools and materials provided."
-        }, {
-            "title": "Kids Workshop: Leprechaun Trap",
-            "event_date": "2026-03-07",
-            "category_name": "Workshop",
-            "window_type": "Morning",
-            "price_text": "Free",
-            "snippet": "Craft a lucky trap for St. Patrick's Day."
-        }]
-    elif "lowe's" in venue_name.lower():
-        return [{
-            "title": "Lowe's Kids Club: Birdhouse",
-            "event_date": "2026-02-21",
-            "category_name": "Workshop",
-            "window_type": "Morning",
-            "price_text": "Free",
-            "snippet": "Build a custom birdhouse for spring!"
-        }]
-    return []
 
 def save_events(events, target_branches, midnight, master_name, mode):
     b_ids = [int(b['id']) for b in target_branches]
@@ -82,6 +100,7 @@ def save_events(events, target_branches, midnight, master_name, mode):
 
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
+    # Initial cleanup of old events
     supabase.table("events").delete().lt("event_date", midnight_today).execute()
     
     masters = supabase.table("places").select("*").eq("is_master", True).execute().data
@@ -94,17 +113,22 @@ def run_scraper():
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches: continue
             
-            # --- PATHWAY A: Retailers (The Fix) ---
-            if any(x in m['name'].lower() for x in ["home depot", "lowe's"]):
-                print(f"🛡️ Using Stable Schedule for {m['name']}...")
-                events = get_hardcoded_retail_events(m['name'])
+            name_low = m['name'].lower()
+            
+            # --- PATHWAY A: Retailers (Hybrid Fix) ---
+            if any(x in name_low for x in ["home depot", "lowe's"]):
+                print(f"🛡️ Using Hybrid Logic for {m['name']}...")
+                events = get_hybrid_retail_events(m['name'])
                 save_events(events, branches, midnight_today, m['name'], mode="global")
 
-            # --- PATHWAY B & C (Untouched & Working) ---
-            elif any(x in m['name'].lower() for x in ["lego", "barnes", "slime"]):
+            # --- PATHWAY B & C: Lego, B&N, Slime, Libraries (Dynamic Fix) ---
+            elif any(x in name_low for x in ["lego", "barnes", "slime"]):
+                print(f"🔍 Dynamic Search for {m['name']} branches...")
                 for branch in branches:
                     scrape_and_save(context, m, [branch], mode="specific", midnight=midnight_today, zip_code=branch['zip_code'])
-            elif "library" in m['name'].lower():
+            
+            elif "library" in name_low:
+                print(f"📚 Mapping Library Events for {m['name']}...")
                 scrape_and_save(context, m, branches, mode="mapping", midnight=midnight_today)
 
         browser.close()
@@ -114,25 +138,34 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     try:
         page.goto(url, wait_until="networkidle", timeout=60000)
+        
+        # Zip Search Logic
         if mode == "specific" and zip_code:
             try:
                 search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
+                search_field.wait_for(state="visible", timeout=7000)
                 search_field.fill(zip_code)
                 page.keyboard.press("Enter")
                 time.sleep(10)
             except: pass
-        
+
         text = clean_html(page.content())
-        # Re-using your original AI extraction for Lego/Libraries
-        prompt = f"Find kids events for {master['name']}. Output JSON list."
-        response = client.models.generate_content(model='gemini-2.0-flash', contents=[prompt, text[:15000]])
+        today_str = datetime.now().strftime('%B %d, %Y')
+        prompt = f"""
+        Today is {today_str}. Find upcoming kids events for {master['name']}.
+        Output a JSON list with: "title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location".
+        Rules: Use 2026. EXCLUDE if no date.
+        """
+        response = client.models.generate_content(model='gemini-2.0-flash', contents=[prompt, text[:18000]])
         res_text = response.text.strip().replace('```json', '').replace('```', '').strip()
         events = json.loads(res_text)
         
         if events:
             save_events(events, target_branches, midnight, master['name'], mode)
-    except: pass
-    finally: page.close()
+    except Exception as e:
+        print(f"❌ Error scraping {master['name']}: {e}")
+    finally:
+        page.close()
 
 if __name__ == "__main__":
     run_scraper()
