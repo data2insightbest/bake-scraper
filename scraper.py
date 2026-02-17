@@ -3,6 +3,7 @@ import time
 import json
 import re
 import random
+import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, time as dt_time
 from google import genai 
@@ -13,7 +14,9 @@ from playwright.sync_api import sync_playwright
 supabase = create_client(os.environ['VITE_SUPABASE_URL'], os.environ['VITE_SUPABASE_KEY'])
 client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+# A high-quality mobile user agent to bypass desktop bot-blocks
+MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 def clean_html(raw_html):
     soup = BeautifulSoup(raw_html, 'html.parser')
@@ -40,45 +43,87 @@ def get_ai_extraction(cleaned_text, venue_name):
         return []
 
 def scroll_to_sections(page):
-    """Deep human-like scroll to trigger lazy-loaded Workshop grids."""
-    for i in range(10): # Increased depth for 2026 site layouts
+    """Human-like scroll for Playwright pathways."""
+    for i in range(8):
         scroll_amount = random.randint(700, 1100)
         page.mouse.wheel(0, scroll_amount)
         time.sleep(random.uniform(1.0, 1.8))
 
+def fetch_via_api_bypass(master, target_branches, midnight):
+    """Bypasses Playwright for Home Depot/Lowe's using direct mobile requests."""
+    headers = {"User-Agent": MOBILE_USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+    try:
+        url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            text = clean_html(response.text)
+            events = get_ai_extraction(text, master['name'])
+            if events:
+                save_events(events, target_branches, midnight, master['name'], mode="global")
+                return True
+        return False
+    except Exception as e:
+        print(f"❌ API Bypass failed for {master['name']}: {e}")
+        return False
+
+def save_events(events, target_branches, midnight, master_name, mode):
+    """Unified save logic to handle Supabase inserts."""
+    b_ids = [int(b['id']) for b in target_branches]
+    supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
+
+    for ev in events:
+        if not is_valid_date(ev.get('event_date')): continue
+        for branch in target_branches:
+            should_add = (mode in ["global", "specific"])
+            if mode == "mapping":
+                loc_hint = str(ev.get('found_location', '')).lower()
+                b_clean = branch['name'].lower().replace("library", "").strip()
+                if b_clean and (b_clean in loc_hint or b_clean in ev['title'].lower()):
+                    should_add = True
+            
+            if should_add:
+                entry = ev.copy()
+                entry.pop('found_location', None)
+                entry.update({
+                    'place_id': branch['id'], 
+                    'place_name': branch['name'], 
+                    'zip_code': branch['zip_code']
+                })
+                supabase.table("events").insert(entry).execute()
+                print(f"   ✨ {master_name} -> {branch['name']}: {ev['title']}")
+
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    # Initial cleanup
     supabase.table("events").delete().lt("event_date", midnight_today).execute()
     
     masters = supabase.table("places").select("*").eq("is_master", True).execute().data
     
     with sync_playwright() as p:
-        # Launching with specific arguments to reduce bot detection
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=USER_AGENT, 
-            viewport={'width': 1920, 'height': 1080}
-        )
-        
-        # KEY FIX: This script hides the 'automated' flag that blocks Home Depot/Lowe's
+        context = browser.new_context(user_agent=DESKTOP_USER_AGENT, viewport={'width': 1920, 'height': 1080})
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
         for m in masters:
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches: continue
             
-            # --- PATHWAY A: Global (Home Depot, Lowe's) ---
-            if any(x in m['name'].lower() for x in ["home depot", "lowe's"]):
-                scrape_and_save(context, m, branches, mode="global", midnight=midnight_today)
+            name_low = m['name'].lower()
+            
+            # --- PATHWAY A: Home Depot & Lowe's (API Bypass) ---
+            if any(x in name_low for x in ["home depot", "lowe's"]):
+                print(f"🚀 API Bypass: {m['name']}...")
+                success = fetch_via_api_bypass(m, branches, midnight_today)
+                if not success:
+                    print(f"   ⚠️ API Bypass failed, falling back to Playwright for {m['name']}...")
+                    scrape_and_save(context, m, branches, mode="global", midnight=midnight_today)
 
-            # --- PATHWAY B: Specific (Lego, Barnes & Noble, Slime Kitchen) ---
-            elif any(x in m['name'].lower() for x in ["lego", "barnes", "slime"]):
+            # --- PATHWAY B: Lego, B&N, Slime Kitchen (Working) ---
+            elif any(x in name_low for x in ["lego", "barnes", "slime"]):
                 for branch in branches:
                     scrape_and_save(context, m, [branch], mode="specific", midnight=midnight_today, zip_code=branch['zip_code'])
 
-            # --- PATHWAY C: Libraries (Mapping) ---
-            elif "library" in m['name'].lower():
+            # --- PATHWAY C: Libraries (Working) ---
+            elif "library" in name_low:
                 scrape_and_save(context, m, branches, mode="mapping", midnight=midnight_today)
 
         browser.close()
@@ -86,62 +131,27 @@ def run_scraper():
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
-    
     try:
-        # 'networkidle' is critical for Home Depot to finish loading its internal API
         page.goto(url, wait_until="networkidle", timeout=90000)
         
-        # Scroll for the big retailers and B&N
         if mode == "global" or (mode == "specific" and "barnes" in master['name'].lower()):
-            print(f"🕵️ Deep scanning {master['name']}...")
             scroll_to_sections(page)
-            time.sleep(4) # Wait for the grid to finish 'painting' after scroll
+            time.sleep(4)
 
-        # Zip Interaction for Lego/Slime
         if mode == "specific" and zip_code:
             try:
-                search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i], input[name*='store' i]").first
+                search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
                 search_field.wait_for(state="visible", timeout=7000)
                 search_field.fill(zip_code)
                 page.keyboard.press("Enter")
                 time.sleep(10)
                 scroll_to_sections(page)
-            except:
-                pass
+            except: pass
 
         text = clean_html(page.content())
         events = get_ai_extraction(text, master['name'])
-        
         if events:
-            # Refresh local data
-            b_ids = [int(b['id']) for b in target_branches]
-            supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
-
-            for ev in events:
-                if not is_valid_date(ev.get('event_date')): continue
-                
-                for branch in target_branches:
-                    should_add = (mode in ["global", "specific"])
-                    
-                    if mode == "mapping":
-                        loc_hint = str(ev.get('found_location', '')).lower()
-                        b_clean = branch['name'].lower().replace("library", "").strip()
-                        if b_clean and (b_clean in loc_hint or b_clean in ev['title'].lower()):
-                            should_add = True
-                    
-                    if should_add:
-                        entry = ev.copy()
-                        entry.pop('found_location', None)
-                        entry.update({
-                            'place_id': branch['id'], 
-                            'place_name': branch['name'], 
-                            'zip_code': branch['zip_code']
-                        })
-                        supabase.table("events").insert(entry).execute()
-                        print(f"   ✨ {master['name']} -> {branch['name']}: {ev['title']}")
-        elif mode == "global":
-            print(f"   ⚠️ No events found for {master['name']}. Structure might have changed.")
-                        
+            save_events(events, target_branches, midnight, master['name'], mode)
     except Exception as e:
         print(f"❌ Error at {master['name']}: {e}")
     finally:
