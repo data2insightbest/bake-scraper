@@ -36,24 +36,20 @@ def get_hybrid_retail_events(venue_name):
     today = datetime.now()
     name_key = "home depot" if "home depot" in venue_name.lower() else "lowe's"
     
-    # Generate for this month and next 2 months
     for i in range(3):
         year = today.year + (today.month + i - 1) // 12
         month = (today.month + i - 1) % 12 + 1
         first_day = datetime(year, month, 1)
         
-        # Find 1st Saturday
         days_to_sat = (5 - first_day.weekday() + 7) % 7
         target_date = first_day + timedelta(days=days_to_sat)
         
-        # Lowe's is 3rd Saturday
         if name_key == "lowe's":
             target_date = target_date + timedelta(weeks=2)
         
         date_str = target_date.strftime('%Y-%m-%d')
         
         if target_date.date() >= today.date():
-            # Step 1: Check Bank | Step 2: Use Generic
             title = PROJECT_BANK.get(name_key, {}).get(date_str, f"{venue_name} Kids Workshop")
             
             events.append({
@@ -100,7 +96,6 @@ def save_events(events, target_branches, midnight, master_name, mode):
 
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    # Initial cleanup of old events
     supabase.table("events").delete().lt("event_date", midnight_today).execute()
     
     masters = supabase.table("places").select("*").eq("is_master", True).execute().data
@@ -115,13 +110,11 @@ def run_scraper():
             
             name_low = m['name'].lower()
             
-            # --- PATHWAY A: Retailers (Hybrid Fix) ---
-            if any(x in name_low for x in ["home depot", "lowe's"]):
+            if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
                 print(f"🛡️ Using Hybrid Logic for {m['name']}...")
                 events = get_hybrid_retail_events(m['name'])
                 save_events(events, branches, midnight_today, m['name'], mode="global")
 
-            # --- PATHWAY B & C: Lego, B&N, Slime, Libraries (Dynamic Fix) ---
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
                 print(f"🔍 Dynamic Search for {m['name']} branches...")
                 for branch in branches:
@@ -139,14 +132,13 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     try:
         page.goto(url, wait_until="networkidle", timeout=60000)
         
-        # Zip Search Logic
         if mode == "specific" and zip_code:
             try:
                 search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
-                search_field.wait_for(state="visible", timeout=7000)
-                search_field.fill(zip_code)
+                search_field.wait_for(state="visible", timeout=10000)
+                search_field.fill(str(zip_code))
                 page.keyboard.press("Enter")
-                time.sleep(10)
+                time.sleep(15) 
             except: pass
 
         text = clean_html(page.content())
@@ -154,14 +146,29 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
         prompt = f"""
         Today is {today_str}. Find upcoming kids events for {master['name']}.
         Output a JSON list with: "title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location".
-        Rules: Use 2026. EXCLUDE if no date.
+        Rules: Use 2026. Return ONLY the JSON list inside brackets. If no events, return [].
         """
         response = client.models.generate_content(model='gemini-2.0-flash', contents=[prompt, text[:18000]])
-        res_text = response.text.strip().replace('```json', '').replace('```', '').strip()
-        events = json.loads(res_text)
         
+        # --- ROBUST JSON EXTRACTION (FIXES THE BN & LIBRARY ERROR) ---
+        res_text = response.text.strip()
+        # This regex looks for anything between [ and ] across multiple lines
+        json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
+        
+        if json_match:
+            try:
+                events = json.loads(json_match.group(0))
+            except json.JSONDecodeError:
+                print(f"   ⚠️ Could not parse JSON for {master['name']}")
+                events = []
+        else:
+            print(f"   ⚠️ No JSON structure found in AI response for {master['name']}")
+            events = []
+        # -------------------------------------------------------------
+
         if events:
             save_events(events, target_branches, midnight, master['name'], mode)
+            
     except Exception as e:
         print(f"❌ Error scraping {master['name']}: {e}")
     finally:
