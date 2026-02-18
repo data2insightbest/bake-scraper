@@ -55,7 +55,7 @@ def get_hybrid_retail_events(venue_name):
     return events
 
 def clean_html(raw_html):
-    soup = BeautifulSoup(raw_html, 'html.parser')
+    soup = BeautifulSoup(raw_html, 'parser')
     for element in soup(["script", "style", "footer", "nav", "header", "aside", "svg"]):
         element.decompose()
     return soup.get_text(separator=' ', strip=True)
@@ -84,7 +84,6 @@ def save_events(events, target_branches, midnight, master_name, mode):
 
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    # Note: I removed the global delete here so you don't lose other data while testing
     
     masters = supabase.table("places").select("*").eq("is_master", True).execute().data
     
@@ -93,32 +92,35 @@ def run_scraper():
         context = browser.new_context(user_agent=MOBILE_USER_AGENT)
         
         for m in masters:
-            # --- TESTING FILTER: ONLY INDOOR PLAYGROUND ---
-            # We check the 'category' field in your table. Adjust name if yours is 'category_name'
-            current_cat = m.get('category', m.get('category_name', ''))
-            if current_cat != "Indoor Playground":
+            # --- UPDATED FILTER: ENSURE "LOST WORLDS" IS CAUGHT ---
+            raw_cat = str(m.get('category') or m.get('category_name') or "").strip()
+            
+            # This is case-insensitive and handles hidden spaces
+            if raw_cat.lower() != "indoor playground":
                 continue 
-            # -----------------------------------------------
+            # ---------------------------------------------------
 
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches: continue
             
             name_low = m['name'].lower().replace("’", "'")
             
-            # The workshop code is still here but will be SKIPPED by the filter above
+            # Branching logic (remains untouched but filtered by category above)
             if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
                 print(f"🛡️ Using Hybrid Logic for {m['name']}...")
                 events = get_hybrid_retail_events(m['name'])
                 save_events(events, branches, midnight_today, m['name'], mode="global")
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
+                print(f"🔍 Dynamic Search for {m['name']}...")
                 for branch in branches:
-                    time.sleep(random.uniform(1.5, 3.5))
+                    time.sleep(random.uniform(2.0, 4.0))
                     scrape_and_save(context, m, [branch], mode="specific", midnight=midnight_today, zip_code=branch['zip_code'])
             elif "library" in name_low:
+                print(f"📚 Mapping Library Events for {m['name']}...")
                 time.sleep(random.uniform(2.0, 4.0))
                 scrape_and_save(context, m, branches, mode="mapping", midnight=midnight_today)
             else:
-                # This is where Indoor Playgrounds will run
+                # This covers Lost Worlds and Sky Zone
                 print(f"🎡 Scraping Events for {m['name']}...")
                 scrape_and_save(context, m, branches, mode="global", midnight=midnight_today)
 
@@ -128,7 +130,19 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     try:
-        page.goto(url, wait_until="networkidle", timeout=60000)
+        # Increased wait time for heavier pages like Facebook
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        time.sleep(10) 
+
+        # --- FACEBOOK COOKIE & POP-UP BUSTER ---
+        try:
+            # Targets common "Allow Cookies" and "Close" buttons on FB and Playgrounds
+            popups = page.locator("button:has-text('Allow all cookies'), div[aria-label='Close'], button:has-text('Accept'), button:has-text('Close')")
+            if popups.first.is_visible():
+                popups.first.click()
+                time.sleep(2)
+        except: pass
+
         if mode == "specific" and zip_code:
             try:
                 search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
@@ -137,17 +151,25 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
                 page.keyboard.press("Enter")
                 time.sleep(15) 
             except: pass
+
         text = clean_html(page.content())
         today_str = datetime.now().strftime('%B %d, %Y')
+        
+        # Adjust prompt if it's a Facebook page
+        platform_context = "This is a Facebook page. Look for event dates in the recent posts." if "facebook.com" in url else ""
+
         prompt = f"""
-        Today is {today_str}. Find upcoming kids events for {master['name']}.
+        Today is {today_str}. {platform_context}
+        Find upcoming kids events (e.g., Toddler Time, Glow Jump, Special Parties) for {master['name']}.
         Output a JSON list with: "title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location".
-        Rules: Use 2026. Return ONLY the JSON list inside brackets. If no events, return [].
+        Rules: Use 2026. Return ONLY the JSON list inside brackets []. If no events found, return [].
         """
+        
         events = []
         for attempt in range(3):
             try:
-                response = client.models.generate_content(model='gemini-2.0-flash', contents=[prompt, text[:18000]])
+                # Use a larger slice of text for Facebook to ensure we get past the header
+                response = client.models.generate_content(model='gemini-2.0-flash', contents=[prompt, text[:25000]])
                 res_text = response.text.strip()
                 json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
                 if json_match:
@@ -155,12 +177,16 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
                 break 
             except Exception as e:
                 if "429" in str(e):
-                    wait_time = (attempt + 1) * 12 
-                    print(f"   ⏳ Rate limited (429). Waiting {wait_time}s to retry {master['name']}...")
+                    wait_time = (attempt + 1) * 15 
+                    print(f"   ⏳ Rate limited. Waiting {wait_time}s...")
                     time.sleep(wait_time)
                 else: raise e 
+
         if events:
             save_events(events, target_branches, midnight, master['name'], mode)
+        else:
+            print(f"   ℹ️ No events identified on page for {master['name']}.")
+            
     except Exception as e:
         print(f"❌ Error scraping {master['name']}: {e}")
     finally:
@@ -168,3 +194,4 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
 
 if __name__ == "__main__":
     run_scraper()
+    
