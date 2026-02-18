@@ -34,7 +34,10 @@ def get_hybrid_retail_events(venue_name):
     """Hybrid Logic: Checks Project Bank first, then calculates dates perpetually."""
     events = []
     today = datetime.now()
-    name_key = "home depot" if "home depot" in venue_name.lower() else "lowe's"
+    
+    # NORMALIZATION: Catch "Lowe’s" (curly) by converting to "lowe's" (straight)
+    clean_venue = venue_name.lower().replace("’", "'")
+    name_key = "home depot" if "home depot" in clean_venue else "lowe's"
     
     for i in range(3):
         year = today.year + (today.month + i - 1) // 12
@@ -108,7 +111,8 @@ def run_scraper():
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches: continue
             
-            name_low = m['name'].lower()
+            # NORMALIZATION: Catching "Lowe’s" in the master name check
+            name_low = m['name'].lower().replace("’", "'")
             
             if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
                 print(f"🛡️ Using Hybrid Logic for {m['name']}...")
@@ -118,10 +122,14 @@ def run_scraper():
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
                 print(f"🔍 Dynamic Search for {m['name']} branches...")
                 for branch in branches:
+                    # RANDOM JITTER: Add a tiny break between branches to prevent rate limits
+                    time.sleep(random.uniform(1.5, 3.5))
                     scrape_and_save(context, m, [branch], mode="specific", midnight=midnight_today, zip_code=branch['zip_code'])
             
             elif "library" in name_low:
                 print(f"📚 Mapping Library Events for {m['name']}...")
+                # RANDOM JITTER: Libraries are many; small break here too
+                time.sleep(random.uniform(2.0, 4.0))
                 scrape_and_save(context, m, branches, mode="mapping", midnight=midnight_today)
 
         browser.close()
@@ -148,23 +156,25 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
         Output a JSON list with: "title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location".
         Rules: Use 2026. Return ONLY the JSON list inside brackets. If no events, return [].
         """
-        response = client.models.generate_content(model='gemini-2.0-flash', contents=[prompt, text[:18000]])
         
-        # --- ROBUST JSON EXTRACTION (FIXES THE BN & LIBRARY ERROR) ---
-        res_text = response.text.strip()
-        # This regex looks for anything between [ and ] across multiple lines
-        json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
-        
-        if json_match:
+        # --- RETRY LOGIC (Backoff) ---
+        events = []
+        for attempt in range(3):
             try:
-                events = json.loads(json_match.group(0))
-            except json.JSONDecodeError:
-                print(f"   ⚠️ Could not parse JSON for {master['name']}")
-                events = []
-        else:
-            print(f"   ⚠️ No JSON structure found in AI response for {master['name']}")
-            events = []
-        # -------------------------------------------------------------
+                response = client.models.generate_content(model='gemini-2.0-flash', contents=[prompt, text[:18000]])
+                res_text = response.text.strip()
+                json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
+                
+                if json_match:
+                    events = json.loads(json_match.group(0))
+                break 
+            except Exception as e:
+                if "429" in str(e):
+                    wait_time = (attempt + 1) * 12 
+                    print(f"   ⏳ Rate limited (429). Waiting {wait_time}s to retry {master['name']}...")
+                    time.sleep(wait_time)
+                else:
+                    raise e 
 
         if events:
             save_events(events, target_branches, midnight, master['name'], mode)
