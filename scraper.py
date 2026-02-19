@@ -48,7 +48,7 @@ def get_daily_batch(limit=24):
         .select("*") \
         .eq("is_master", True) \
         .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}") \
-        .order("last_scraped_at", ascending=True) \
+        .order("last_scraped_at", desc=False) \
         .limit(limit) \
         .execute()
     return res.data
