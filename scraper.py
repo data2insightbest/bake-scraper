@@ -15,7 +15,7 @@ client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
 MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 
-# --- Hybrid Step 1: The Project Bank ---
+# --- Hybrid Step 1: The Project Bank (Untouched) ---
 PROJECT_BANK = {
     "home depot": {
         "2026-02-07": "Kids Workshop: Penguin Mailbox",
@@ -42,7 +42,7 @@ def is_valid_date(date_str):
     return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
 
 def get_daily_batch(limit=24):
-    """Batches places: 24+24+rest. Ensures a full rotation every 3 days."""
+    """Batches places: 24+24+rest. Fix: Used desc=False for latest Supabase SDK."""
     three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
     res = supabase.table("places") \
         .select("*") \
@@ -108,7 +108,7 @@ def save_events(events, target_branches, midnight, master_name, mode):
 # --- Scraper Pathways ---
 
 def get_hybrid_retail_events(venue_name):
-    """Your original logic for Home Depot and Lowe's (Fully Restored)."""
+    """Your original logic for Home Depot and Lowe's."""
     events = []
     today = datetime.now()
     clean_venue = venue_name.lower().replace("’", "'")
@@ -132,19 +132,19 @@ def get_hybrid_retail_events(venue_name):
     return events
 
 def run_gemini_discovery(midnight):
-    """Daily Discovery: Searching for Bay Area pop-ups in the next 3 months."""
+    """Daily Discovery: Searching for Bay Area pop-ups (Gap Filler)."""
     today_str = datetime.now().strftime('%Y-%m-%d')
     future_str = (datetime.now() + timedelta(days=90)).strftime('%Y-%m-%d')
     
     prompt = f"""
-    Today is {today_str}. Find kids special events or holiday pop-ups in the SF Bay Area 
-    from {today_str} to {future_str}. Focus on one-time events like festivals.
+    Today is {today_str}. Search for special kids events or holiday pop-ups in the SF Bay Area 
+    from {today_str} to {future_str}. Focus on one-time events like festivals or museum days.
     Return ONLY a JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
     """
-    print("🧠 Running Daily Pop-up Discovery...")
+    print("🧠 Running Daily Pop-up Discovery (Gap Filler)...")
     events = generate_with_retry(prompt, "San Francisco Bay Area Special Events")
     if events:
-        # 999 is a 'Community' marker place_id
+        # Generic community marker
         community_branch = {"id": 1, "name": "Bay Area Pop-up", "zip_code": "94103"}
         save_events(events, [community_branch], midnight, "Discovery", mode="global")
 
@@ -159,7 +159,7 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
 
         prompt = f"""
         Today is {today_str}. Find ONLY special, one-time kids events for {master['name']}. 
-        IGNORE routine daily open play. Look for holiday events or themed parties.
+        IGNORE routine daily activities. Look for themed parties or workshops.
         Return ONLY JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
         """
         events = generate_with_retry(prompt, text)
@@ -170,43 +170,45 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     finally:
         page.close()
 
-# --- Main Runner ---
+# --- Main Runner (Official Sources -> Discovery Gap Filler) ---
 
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
     
-    # 1. Pop-up Search
-    run_gemini_discovery(midnight_today)
-
-    # 2. Batch Processing
+    # 1. Batch Processing (Official Websites First)
     masters = get_daily_batch(limit=24)
-    print(f"🚀 Processing Daily Batch: {len(masters)} places...")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=MOBILE_USER_AGENT)
-        
-        for m in masters:
-            # Update timestamp so it moves to the bottom of the list
-            supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
-
-            branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
-            if not branches: continue
+    if not masters:
+        print("✅ All masters are up to date.")
+    else:
+        print(f"🚀 Processing Batch: {len(masters)} official sites...")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=MOBILE_USER_AGENT)
             
-            name_low = m['name'].lower().replace("’", "'")
-            
-            if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
-                events = get_hybrid_retail_events(m['name'])
-                save_events(events, branches, midnight_today, m['name'], mode="global")
-            elif any(x in name_low for x in ["lego", "barnes", "slime"]):
-                for br in branches:
-                    scrape_and_save(context, m, [br], "specific", midnight_today, zip_code=br['zip_code'])
-            elif "library" in name_low:
-                scrape_and_save(context, m, branches, "mapping", midnight_today)
-            else:
-                scrape_and_save(context, m, branches, "global", midnight_today)
+            for m in masters:
+                # Mark as scraped IMMEDIATELY to update the timestamp
+                supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
 
-        browser.close()
+                branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
+                if not branches: continue
+                
+                name_low = m['name'].lower().replace("’", "'")
+                
+                if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
+                    events = get_hybrid_retail_events(m['name'])
+                    save_events(events, branches, midnight_today, m['name'], mode="global")
+                elif any(x in name_low for x in ["lego", "barnes", "slime"]):
+                    for br in branches:
+                        scrape_and_save(context, m, [br], "specific", midnight_today, zip_code=br['zip_code'])
+                elif "library" in name_low:
+                    scrape_and_save(context, m, branches, "mapping", midnight_today)
+                else:
+                    scrape_and_save(context, m, branches, "global", midnight_today)
+
+            browser.close()
+
+    # 2. Daily Pop-up Discovery (Run last to fill gaps)
+    run_gemini_discovery(midnight_today)
 
 if __name__ == "__main__":
     run_scraper()
