@@ -15,7 +15,7 @@ client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
 MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 
-# --- Hybrid Step 1: The Project Bank (Untouched) ---
+# --- Hybrid Step 1: The Project Bank (UNTOUCHED) ---
 PROJECT_BANK = {
     "home depot": {
         "2026-02-07": "Kids Workshop: Penguin Mailbox",
@@ -32,7 +32,6 @@ PROJECT_BANK = {
 # --- Core Utilities ---
 
 def clean_html(raw_html):
-    """Fixed BS4 parser error by specifying 'html.parser'."""
     soup = BeautifulSoup(raw_html, 'html.parser')
     for element in soup(["script", "style", "footer", "nav", "header", "aside", "svg"]):
         element.decompose()
@@ -42,7 +41,7 @@ def is_valid_date(date_str):
     return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
 
 def get_daily_batch(limit=24):
-    """Batches places: 24+24+rest. Fix: Used desc=False for latest Supabase SDK."""
+    """Batches places by last_scraped_at timestamp."""
     three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
     res = supabase.table("places") \
         .select("*") \
@@ -53,15 +52,12 @@ def get_daily_batch(limit=24):
         .execute()
     return res.data
 
-# --- Gemini Logic with Exponential Backoff ---
-
 def generate_with_retry(prompt, text_content, max_attempts=3):
-    """Implements Exponential Backoff (10s, 20s, 40s) for API resilience."""
     for attempt in range(max_attempts):
         try:
             response = client.models.generate_content(
                 model='gemini-2.0-flash', 
-                contents=[prompt, text_content[:25000]]
+                contents=[prompt, text_content[:28000]]
             )
             res_text = response.text.strip()
             json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
@@ -70,11 +66,9 @@ def generate_with_retry(prompt, text_content, max_attempts=3):
             return []
         except Exception as e:
             if "429" in str(e):
-                wait_time = (2 ** attempt) * 10 
-                print(f"   ⏳ Rate limited (429). Attempt {attempt+1}/{max_attempts}. Retrying in {wait_time}s...")
+                wait_time = (2 ** attempt) * 15
                 time.sleep(wait_time)
             else:
-                print(f"   ⚠️ Gemini Error: {e}")
                 break 
     return []
 
@@ -84,7 +78,7 @@ def save_events(events, target_branches, midnight, master_name, mode):
     for ev in events:
         if not is_valid_date(ev.get('event_date')): continue
         for branch in target_branches:
-            # DEDUPLICATION: Check for existing title+date for this place
+            # Triple-check deduplication: Title, Date, and Place
             existing = supabase.table("events") \
                 .select("id") \
                 .eq("event_date", ev['event_date']) \
@@ -108,7 +102,7 @@ def save_events(events, target_branches, midnight, master_name, mode):
 # --- Scraper Pathways ---
 
 def get_hybrid_retail_events(venue_name):
-    """Your original logic for Home Depot and Lowe's."""
+    """UNTOUCHED: Original logic for Home Depot and Lowe's."""
     events = []
     today = datetime.now()
     clean_venue = venue_name.lower().replace("’", "'")
@@ -132,50 +126,68 @@ def get_hybrid_retail_events(venue_name):
     return events
 
 def run_gemini_discovery(midnight):
-    """Daily Discovery: Searching for Bay Area pop-ups (Gap Filler)."""
+    """Daily Discovery: Gap Filler for Bay Area pop-ups."""
     today_str = datetime.now().strftime('%Y-%m-%d')
-    future_str = (datetime.now() + timedelta(days=90)).strftime('%Y-%m-%d')
-    
-    prompt = f"""
-    Today is {today_str}. Search for special kids events or holiday pop-ups in the SF Bay Area 
-    from {today_str} to {future_str}. Focus on one-time events like festivals or museum days.
-    Return ONLY a JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
-    """
-    print("🧠 Running Daily Pop-up Discovery (Gap Filler)...")
+    prompt = f"Today is {today_str}. Search for major Bay Area kids festivals or seasonal pop-ups. Return ONLY JSON list: ['title', 'event_date', 'category_name', 'window_type', 'price_text', 'snippet', 'found_location']."
+    print("🧠 Running Daily Pop-up Discovery...")
     events = generate_with_retry(prompt, "San Francisco Bay Area Special Events")
     if events:
-        # Generic community marker
         community_branch = {"id": 1, "name": "Bay Area Pop-up", "zip_code": "94103"}
         save_events(events, [community_branch], midnight, "Discovery", mode="global")
 
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
+    
+    # 1. Strategy Detection
+    cat_str = (master.get('category') or "").lower()
+    is_workshop = any(kw in cat_str for kw in ["workshop", "hands on", "experience"])
+    
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(5)
+        
+        # --- SCROLLING: Trigger lazy loading for event grids ---
+        page.evaluate("window.scrollBy(0, 1500)")
+        time.sleep(5) 
+        
         text = clean_html(page.content())
         today_str = datetime.now().strftime('%B %d, %Y')
 
-        prompt = f"""
-        Today is {today_str}. Find ONLY special, one-time kids events for {master['name']}. 
-        IGNORE routine daily activities. Look for themed parties or workshops.
-        Return ONLY JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
-        """
+        if is_workshop:
+            # WORKSHOP STRATEGY: Generous (Satisfactory results from 2 days ago)
+            prompt = f"""
+            Today is {today_str}. Extract ALL scheduled kids workshops and projects for {master['name']}.
+            Keep ALL upcoming sessions, including recurring monthly/weekly projects. 
+            Return ONLY JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
+            """
+        else:
+            # SPECIAL PROGRAMMING STRATEGY: Strict but inclusive of Exhibits
+            prompt = f"""
+            Today is {today_str}. Act as a curator for {master['name']}.
+            Find: 
+            1. Special Exhibits (even if they last for 3 months).
+            2. Scheduled programs (performances, timed shows, special guests).
+            3. Seasonal pop-ups.
+            IGNORE: Regular cafe hours, gift shop info, and permanent 'Daily Admission' text.
+            If an exhibit lasts for a date range, just list the dates you can find.
+            Return ONLY JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
+            """
+
+        print(f"📡 Scraped {len(text)} chars from {master['name']} ({'Workshop' if is_workshop else 'Exhibit'} Mode)")
         events = generate_with_retry(prompt, text)
         if events:
             save_events(events, target_branches, midnight, master['name'], mode)
     except Exception as e:
-        print(f"❌ Error scraping {master['name']}: {e}")
+        print(f"❌ Error: {e}")
     finally:
         page.close()
 
-# --- Main Runner (Official Sources -> Discovery Gap Filler) ---
+# --- Main Runner ---
 
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
     
-    # 1. Batch Processing (Official Websites First)
+    # 1. Batch Official Sources First
     masters = get_daily_batch(limit=24)
     if not masters:
         print("✅ All masters are up to date.")
@@ -186,7 +198,7 @@ def run_scraper():
             context = browser.new_context(user_agent=MOBILE_USER_AGENT)
             
             for m in masters:
-                # Mark as scraped IMMEDIATELY to update the timestamp
+                # Update timestamp immediately to avoid infinite loops on error
                 supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
 
                 branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
@@ -207,7 +219,7 @@ def run_scraper():
 
             browser.close()
 
-    # 2. Daily Pop-up Discovery (Run last to fill gaps)
+    # 2. Discovery Runs last to fill gaps
     run_gemini_discovery(midnight_today)
 
 if __name__ == "__main__":
