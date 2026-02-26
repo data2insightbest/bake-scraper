@@ -51,14 +51,16 @@ def calculate_window(date_str):
         return "Special Scout"
     except: return "Daily Refresh"
 
+# MODIFIED: Added secondary order by ID to ensure it starts at the top when dates are NULL
 def get_daily_batch(limit=24):
-    """Rotation: Picks 24 Masters based on oldest last_scraped_at timestamp."""
+    """Rotation: Picks 24 Masters based on oldest timestamp, then by ID."""
     three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
     res = supabase.table("places") \
         .select("*") \
         .eq("is_master", True) \
         .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}") \
         .order("last_scraped_at", desc=False) \
+        .order("id", desc=False) \
         .limit(limit) \
         .execute()
     return res.data
@@ -67,7 +69,6 @@ def generate_with_retry(prompt, text_content, context_name="General"):
     """Your preferred retry logic (12s linear backoff) in a reusable helper."""
     for attempt in range(3):
         try:
-            # Proactive 2s breath to reduce rate-limit hits
             time.sleep(2) 
             response = client.models.generate_content(
                 model='gemini-2.0-flash', 
@@ -113,11 +114,18 @@ def get_hybrid_retail_events(venue_name):
             })
     return events
 
+# MODIFIED: Only deletes existing events if NEW events were actually found
 def save_events(events, target_branches, midnight, master_name, mode):
+    if not events or len(events) == 0:
+        print(f"   ⚠️ No events found for {master_name}. Skipping update to keep old data.")
+        return
+
     b_ids = [int(b['id']) for b in target_branches]
-    # Clean only the branches we are currently updating
+    
+    # Safe delete: Only happens now if we have 'events' to replace them with
     supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
 
+    count = 0
     for ev in events:
         if not is_valid_date(ev.get('event_date')): continue
         window = calculate_window(ev['event_date'])
@@ -138,7 +146,10 @@ def save_events(events, target_branches, midnight, master_name, mode):
                     'zip_code': branch['zip_code'], 'window_type': window
                 })
                 supabase.table("events").insert(entry).execute()
-                print(f"   ✨ {master_name} -> {branch['name']}: {ev['title']} ({window})")
+                count += 1
+    
+    if count > 0:
+        print(f"   ✨ {master_name}: Saved {count} events across branches.")
 
 # --- Discovery Logic ---
 
@@ -179,8 +190,7 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
             prompt = f"Today is {today_str}. Act as a curator. Look for 'Upcoming Events' or 'Special Programs' on {master['name']}. Ignore daily routine hours. Output JSON list: [title, event_date, category_name, price_text, snippet, found_location]."
         
         events = generate_with_retry(prompt, text, master['name'])
-        if events:
-            save_events(events, target_branches, midnight, master['name'], mode)
+        save_events(events, target_branches, midnight, master['name'], mode)
             
     except Exception as e:
         print(f"❌ Error scraping {master['name']}: {e}")
@@ -189,7 +199,6 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
 
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    # Apply Rotation
     masters = get_daily_batch(limit=24)
     if not masters: 
         print("✅ Batch complete. No places due for scraping.")
@@ -200,7 +209,6 @@ def run_scraper():
         context = browser.new_context(user_agent=MOBILE_USER_AGENT)
         
         for m in masters:
-            # Mark as scraped at start of loop to ensure rotation advances
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
             
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
