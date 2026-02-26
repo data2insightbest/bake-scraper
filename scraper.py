@@ -16,6 +16,7 @@ client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
 MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 
+# --- Hybrid Logic: Project Bank ---
 PROJECT_BANK = {
     "home depot": {
         "2026-02-07": "Kids Workshop: Penguin Mailbox",
@@ -29,7 +30,7 @@ PROJECT_BANK = {
     }
 }
 
-# --- Utility Functions ---
+# --- Utility & AI Functions ---
 
 def clean_html(raw_html):
     soup = BeautifulSoup(raw_html, 'html.parser')
@@ -41,7 +42,7 @@ def is_valid_date(date_str):
     return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
 
 def calculate_window(date_str):
-    """Calculates the 3-tab window based on the event date."""
+    """Calculates the 3-tab window (Daily, Weekly, Special) based on the event date."""
     try:
         ev_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         diff = (ev_date - datetime.now().date()).days
@@ -51,7 +52,7 @@ def calculate_window(date_str):
     except: return "Daily Refresh"
 
 def get_daily_batch(limit=24):
-    """Rotation logic for scraping masters."""
+    """Rotation: Picks 24 Masters based on oldest last_scraped_at timestamp."""
     three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
     res = supabase.table("places") \
         .select("*") \
@@ -62,28 +63,34 @@ def get_daily_batch(limit=24):
         .execute()
     return res.data
 
-def generate_with_retry(prompt, text_content):
-    """Central AI caller with rate-limit handling."""
+def generate_with_retry(prompt, text_content, context_name="General"):
+    """Your preferred retry logic (12s linear backoff) in a reusable helper."""
     for attempt in range(3):
         try:
+            # Proactive 2s breath to reduce rate-limit hits
+            time.sleep(2) 
             response = client.models.generate_content(
                 model='gemini-2.0-flash', 
                 contents=[prompt, text_content[:28000]]
             )
             res_text = response.text.strip()
             json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
+            
             if json_match:
                 return json.loads(json_match.group(0))
             return []
+
         except Exception as e:
             if "429" in str(e):
-                wait_time = (attempt + 1) * 15
-                print(f"   ⏳ Rate limited. Waiting {wait_time}s...")
+                wait_time = (attempt + 1) * 12
+                print(f"   ⏳ Rate limited (429). Waiting {wait_time}s to retry {context_name}...")
                 time.sleep(wait_time)
             else:
-                print(f"   ⚠️ AI Error: {e}")
-                break
+                print(f"   ⚠️ AI Error for {context_name}: {e}")
+                break 
     return []
+
+# --- Business Logic ---
 
 def get_hybrid_retail_events(venue_name):
     events = []
@@ -106,10 +113,9 @@ def get_hybrid_retail_events(venue_name):
             })
     return events
 
-# --- Logic & Saving ---
-
 def save_events(events, target_branches, midnight, master_name, mode):
     b_ids = [int(b['id']) for b in target_branches]
+    # Clean only the branches we are currently updating
     supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
 
     for ev in events:
@@ -134,16 +140,18 @@ def save_events(events, target_branches, midnight, master_name, mode):
                 supabase.table("events").insert(entry).execute()
                 print(f"   ✨ {master_name} -> {branch['name']}: {ev['title']} ({window})")
 
+# --- Discovery Logic ---
+
 def run_gemini_discovery(midnight):
     print("🧠 Running Discovery for major Bay Area festivals...")
     today_str = datetime.now().strftime('%B %d, %Y')
-    prompt = f"Today is {today_str}. Search for major San Francisco Bay Area kids festivals or seasonal community events in the next 90 days. Return JSON list: ['title', 'event_date', 'category_name', 'price_text', 'snippet']."
-    events = generate_with_retry(prompt, "Bay Area Kids Events")
+    prompt = f"Today is {today_str}. Search for major San Francisco Bay Area kids festivals (e.g. Cherry Blossom, Maker Faire) or seasonal museum events in the next 90 days. Return ONLY JSON list: ['title', 'event_date', 'category_name', 'price_text', 'snippet']."
+    events = generate_with_retry(prompt, "San Francisco Bay Area Community", "Gemini Discovery")
     if events:
         discovery_branch = {"id": 1, "name": "Bay Area Pop-up", "zip_code": "94103"}
         save_events(events, [discovery_branch], midnight, "Discovery", mode="global")
 
-# --- Scraper Pathway ---
+# --- Core Scraper Engine ---
 
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
@@ -166,11 +174,11 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
         
         cat_name = (master.get('category') or "").lower()
         if "workshop" in cat_name or "library" in master['name'].lower():
-            prompt = f"Today is {today_str}. Find ALL kids events for {master['name']}. Output JSON list: [title, event_date, category_name, price_text, snippet, found_location]."
+            prompt = f"Today is {today_str}. Find ALL upcoming kids events for {master['name']}. Output JSON list: [title, event_date, category_name, price_text, snippet, found_location]."
         else:
-            prompt = f"Today is {today_str}. Act as a curator. Focus on 'Upcoming Events' or 'Featured' for {master['name']}. Ignore daily routine hours. Output JSON list: [title, event_date, category_name, price_text, snippet, found_location]."
+            prompt = f"Today is {today_str}. Act as a curator. Look for 'Upcoming Events' or 'Special Programs' on {master['name']}. Ignore daily routine hours. Output JSON list: [title, event_date, category_name, price_text, snippet, found_location]."
         
-        events = generate_with_retry(prompt, text)
+        events = generate_with_retry(prompt, text, master['name'])
         if events:
             save_events(events, target_branches, midnight, master['name'], mode)
             
@@ -181,33 +189,43 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
 
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    supabase.table("events").delete().lt("event_date", midnight_today).execute()
-    
+    # Apply Rotation
     masters = get_daily_batch(limit=24)
-    if not masters: return
+    if not masters: 
+        print("✅ Batch complete. No places due for scraping.")
+        return
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=MOBILE_USER_AGENT)
         
         for m in masters:
+            # Mark as scraped at start of loop to ensure rotation advances
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
+            
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches: continue
             
             name_low = m['name'].lower().replace("’", "'")
             
             if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
-                save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m['name'], "global")
+                print(f"🛡️ Hybrid Logic: {m['name']}")
+                save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m['name'], mode="global")
+
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
+                print(f"🔍 Specific Search: {m['name']}")
                 for branch in branches:
-                    time.sleep(random.uniform(1.5, 3.5))
-                    scrape_and_save(context, m, [branch], "specific", midnight_today, branch['zip_code'])
+                    time.sleep(random.uniform(2, 4))
+                    scrape_and_save(context, m, [branch], mode="specific", midnight=midnight_today, zip_code=branch['zip_code'])
+            
             elif "library" in name_low:
-                time.sleep(random.uniform(2.0, 4.0))
-                scrape_and_save(context, m, branches, "mapping", midnight_today)
+                print(f"📚 Library Mapping: {m['name']}")
+                scrape_and_save(context, m, branches, mode="mapping", midnight=midnight_today)
+            
             else:
-                scrape_and_save(context, m, branches, "global", midnight_today)
+                print(f"🏛️ Curator Search: {m['name']}")
+                scrape_and_save(context, m, branches, mode="global", midnight=midnight_today)
+
         browser.close()
     
     run_gemini_discovery(midnight_today)
