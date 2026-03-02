@@ -111,18 +111,20 @@ def generate_with_retry(prompt, text_content, context_name="General"):
     return []
 
 def get_daily_batch(limit=24):
+    """Reverted logic to fix nulls_first crash while keeping ID sorting."""
     three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
-    # Adding nulls_first=True ensures your reset rows (NULL) always stay at the top
+    # 1. Sort by last_scraped_at (NULLs naturally group together)
+    # 2. Sort by ID (Ensures ID 1, 2, 3 come first within the NULL group)
     res = supabase.table("places")\
         .select("*")\
         .eq("is_master", True)\
         .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}")\
-        .order("last_scraped_at", desc=False, nulls_first=True)\
-        .order("id", desc=False)\
+        .order("last_scraped_at")\
+        .order("id")\
         .limit(limit)\
         .execute()
     return res.data
-
+    
 # --- Business Logic & Saving ---
 
 def save_events(events, target_branches, midnight, master, mode):
