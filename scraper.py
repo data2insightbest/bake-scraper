@@ -208,14 +208,13 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
-    # Dynamic 90-day window for the AI prompt
     today = datetime.now()
     future_date = today + timedelta(days=90)
-    range_str = f"{today.strftime('%B %Y')} to {future_date.strftime('%B %Y')}"
+    range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
     
     try:
-        # 1. Wait for the initial shell to load
-        page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        # 1. Navigation with 'networkidle' to catch initial API calls
+        page.goto(url, wait_until="networkidle", timeout=90000)
         
         if mode == "specific" and zip_code:
             try:
@@ -227,45 +226,46 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
             except: pass
 
         if mode != "specific":
-            # 2. Human-like scrolling to trigger lazy-loaded museum components
-            for _ in range(6):
-                page.evaluate(f"window.scrollBy(0, {random.randint(500, 850)})")
-                time.sleep(random.uniform(1.0, 2.0))
+            # 2. UNIVERSAL FIX: Exhaustive Scroll
+            # We scroll to the very bottom in small increments to trigger 'Lazy Loading' cards
+            print(f"   🖱️ Scrolling {master['name']} to trigger lazy-load...")
+            for _ in range(8):
+                page.evaluate("window.scrollBy(0, window.innerHeight)")
+                time.sleep(2) # Give the images/text time to 'pop' in
             
-            # 3. The 'Museum Buffer' - 12s allows heavy API data to render
-            print(f"   ⏳ Deep-waiting 12s for {master['name']} dynamic calendar...")
-            time.sleep(12) 
+            # 3. Buffer for any final background data
+            time.sleep(5) 
             page.screenshot(path=f"debug_{re.sub(r'\W+', '', master['name'])}.png")
 
-        # 4. DEEP-SCAN: Capture text from the main page AND all nested Iframes
-        # This is where the 'hidden' museum calendars are usually found
-        all_text_fragments = []
+        # 4. CAPTURE ALL DATA (Main + Iframes)
+        # By getting text AFTER the exhaustive scroll, we capture 'Featured' sections that were hidden
+        all_text = [page.evaluate("document.body.innerText")]
         for frame in page.frames:
             try:
                 f_text = frame.evaluate("document.body.innerText")
-                if f_text and len(f_text) > 20:
-                    all_text_fragments.append(f_text)
+                if len(f_text) > 50: all_text.append(f_text)
             except: continue
-        combined_text = "\n---\n".join(all_text_fragments)
+        combined_text = "\n---\n".join(all_text)
         
-        # 5. Targeted AI Prompt using the calculated date range
+        # 5. The 90-Day Sliding Prompt
         prompt = f"""
         Today is {today.strftime('%B %d, %Y')}. 
-        Find ALL upcoming public events, family programs, or festivals for {master['name']} between {range_str}.
-        Output a JSON list with: "title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location".
+        Find ALL upcoming public events, workshops, or special exhibits for {master['name']} between {range_str}.
+        I need the 'New and Featured' events as well as recurring programs.
+        Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location"].
         Rules:
-        1. Use year 2026.
-        2. If specific 'kids' events aren't found, include general family-friendly programs.
-        3. Return ONLY the JSON list []. If truly none found, return [].
+        1. Year must be 2026.
+        2. If no specific 'kids' events found, include family-friendly programs.
+        3. Return ONLY the JSON list []. If none, return [].
         """
         
         events = generate_with_retry(prompt, combined_text, master['name'])
 
         if events:
             save_events(events, target_branches, midnight, master, mode)
-            print(f"   ✅ Successfully saved {len(events)} events for {master['name']}.")
+            print(f"   ✅ Successfully found {len(events)} events for {master['name']}.")
         else:
-            print(f"   ⚠️ Gemini found 0 events for {master['name']} in the scraped text.")
+            print(f"   ⚠️ Gemini found 0 events for {master['name']} in the {range_str} window.")
             
     except Exception as e:
         print(f"❌ Error scraping {master['name']}: {e}")
