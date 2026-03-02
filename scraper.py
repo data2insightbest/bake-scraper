@@ -193,12 +193,12 @@ def save_events(events, target_branches, midnight, master, mode):
                 supabase.table("events").insert(entry).execute()
                 
 # --- Scraper Pathway ---
-
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     try:
-        page.goto(url, wait_until="networkidle", timeout=60000)
+        # 1. Smarter Navigation: Use a longer timeout and wait for load
+        page.goto(url, wait_until="load", timeout=90000)
         
         if mode == "specific" and zip_code:
             try:
@@ -206,33 +206,53 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
                 search_field.wait_for(state="visible", timeout=10000)
                 search_field.fill(str(zip_code))
                 page.keyboard.press("Enter")
-                time.sleep(15) 
+                time.sleep(10) 
             except: pass
 
+        # 2. Enhanced Universal Interaction
         if mode != "specific":
-            for _ in range(3):
-                page.evaluate("window.scrollBy(0, window.innerHeight)")
-                time.sleep(2)
+            # Scroll multiple times to trigger 'Lazy Loading'
+            for _ in range(4):
+                page.evaluate("window.scrollBy(0, 800)")
+                time.sleep(1.5)
+            
+            # CRITICAL: Wait for the dynamic calendar data to actually appear
+            print(f"   ⏳ Waiting for dynamic content on {master['name']}...")
+            time.sleep(8) 
+            
+            # Save debug image
             page.screenshot(path=f"debug_{re.sub(r'\W+', '', master['name'])}.png")
 
-        text = clean_html(page.content())
+        # 3. Get more robust text content
+        # We use innerText of body to avoid script/style tags but catch all visible text
+        text = page.evaluate("document.body.innerText")
+        
         today_str = datetime.now().strftime('%B %d, %Y')
+        
+        # 4. Looser Prompt: Focus on 'Events and Programs' to avoid AI filtering out valid stuff
         prompt = f"""
-        Today is {today_str}. Find upcoming kids events for {master['name']}.
+        Today is {today_str}. Find all upcoming public events, workshops, or programs for {master['name']}.
         Output a JSON list with: "title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location".
-        Rules: Use 2026. Return ONLY the JSON list inside brackets. If no events, return [].
+        Rules:
+        1. Use the year 2026.
+        2. If a price isn't listed, use 'Check website'.
+        3. Return ONLY the JSON list inside brackets []. 
+        4. If no events are found, return [].
         """
         
+        # Use existing retry logic
         events = generate_with_retry(prompt, text, master['name'])
 
         if events:
             save_events(events, target_branches, midnight, master, mode)
+        else:
+            print(f"   ⚠️ No events extracted from {master['name']}. Check debug screenshot.")
             
     except Exception as e:
         print(f"❌ Error scraping {master['name']}: {e}")
     finally:
         page.close()
-
+        
 def run_gemini_discovery(midnight):
     today = datetime.now()
     future_date = today + timedelta(days=90)
