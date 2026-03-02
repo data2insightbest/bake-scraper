@@ -133,14 +133,42 @@ def save_events(events, target_branches, midnight, master, mode):
     official_cat = master.get('category', 'Activity') if isinstance(master, dict) else master
     b_ids = [int(b['id']) for b in target_branches]
     
+    # Pre-clean existing records
     supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
+
+    # 1. TRACE: Frequency Calculation
+    # We count occurrences of each title to find 'Common' vs 'Rare' events
+    title_counts = {}
+    for ev in events:
+        t = ev['title'].lower()
+        title_counts[t] = title_counts.get(t, 0) + 1
+
+    special_keywords = ["festival", "annual", "holiday", "celebration", "fair", "parade"]
 
     for ev in events:
         if not is_valid_date(ev.get('event_date')): continue
         
-        t_count = sum(1 for e in events if e['title'].lower() == ev['title'].lower())
-        spec_score = random.randint(8, 10) if t_count == 1 else random.randint(1, 4)
+        title_low = ev['title'].lower()
+        count = title_counts.get(title_low, 1)
         
+        # 2. TRACE: Implement the Specificity Score
+        # RARE titles (count=1) get high scores. 
+        # COMMON titles (count > 2) get low scores.
+        if count == 1:
+            # It's unique in this batch!
+            spec_score = random.randint(8, 10)
+        elif count == 2:
+            # Semi-unique (maybe 2 branches have it)
+            spec_score = random.randint(5, 7)
+        else:
+            # Common/Recurring (Home Depot, Storytimes, etc.)
+            spec_score = random.randint(1, 4)
+
+        # 3. TRACE: Keyword Override
+        # Even if it's common, if it's a 'Festival', boost it.
+        if any(kw in title_low for kw in special_keywords):
+            spec_score = min(10, spec_score + 5)
+
         window = calculate_window(ev['event_date'])
 
         for branch in target_branches:
@@ -148,7 +176,7 @@ def save_events(events, target_branches, midnight, master, mode):
             if mode == "mapping":
                 loc_hint = str(ev.get('found_location', '')).lower()
                 b_clean = branch['name'].lower().replace("library", "").strip()
-                if b_clean and (b_clean in loc_hint or b_clean in ev['title'].lower()):
+                if b_clean and (b_clean in loc_hint or b_clean in title_low):
                     should_add = True
             
             if should_add:
@@ -163,7 +191,7 @@ def save_events(events, target_branches, midnight, master, mode):
                     'zip_code': branch['zip_code']
                 })
                 supabase.table("events").insert(entry).execute()
-
+                
 # --- Scraper Pathway ---
 
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
@@ -206,20 +234,19 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
         page.close()
 
 def run_gemini_discovery(midnight):
-    # Calculate 90 days from now
     today = datetime.now()
     future_date = today + timedelta(days=90)
     range_str = f"{today.strftime('%B %Y')} to {future_date.strftime('%B %Y')}"
     
     print(f"🧠 Running Discovery for Bay Area festivals ({range_str})...")
     
-    # Updated prompt to be dynamic
     prompt = f"Find 8 major kids festivals in the SF Bay Area happening between {range_str}. Return JSON: [title, event_date(YYYY-MM-DD), price_text, snippet]."
     
     events = generate_with_retry(prompt, "Bay Area", "Discovery")
     if events:
-        discovery_master = {"id": 1, "name": "Bay Area Pop-up", "category": "Special Events"}
-        save_events(events, [{"id": 1, "name": "Bay Area Pop-up", "zip_code": "94103"}], midnight, discovery_master, "global")
+        # Use ID 9999 to prevent collision with Academy of Sciences (ID 1)
+        discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category": "Special Events"}
+        save_events(events, [{"id": 9999, "name": "Bay Area Pop-up", "zip_code": "94103"}], midnight, discovery_master, "global")
         
 def run_scraper():
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
