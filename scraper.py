@@ -110,21 +110,32 @@ def generate_with_retry(prompt, text_content, context_name="General"):
                 break 
     return []
 
-def get_daily_batch(limit=24):
-    """Reverted logic to fix nulls_first crash while keeping ID sorting."""
-    three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
+#def get_daily_batch(limit=24):
+ #   """Reverted logic to fix nulls_first crash while keeping ID sorting."""
+  #  three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
     # 1. Sort by last_scraped_at (NULLs naturally group together)
     # 2. Sort by ID (Ensures ID 1, 2, 3 come first within the NULL group)
+   # res = supabase.table("places")\
+    #    .select("*")\
+     #   .eq("is_master", True)\
+      #  .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}")\
+       # .order("last_scraped_at")\
+        #.order("id")\
+        #.limit(limit)\
+        #.execute()
+    #return res.data
+ 
+def get_daily_batch(limit=24):
+    """Modified to strictly test IDs 1 through 5 only."""
+    # We remove the three_days_ago filter to ensure we grab these 5 regardless of status
     res = supabase.table("places")\
         .select("*")\
-        .eq("is_master", True)\
-        .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}")\
-        .order("last_scraped_at")\
+        .in_("id", [1, 2, 3, 4, 5])\
         .order("id")\
         .limit(limit)\
         .execute()
     return res.data
-    
+     
 # --- Business Logic & Saving ---
 
 def save_events(events, target_branches, midnight, master, mode):
@@ -197,13 +208,14 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
-    # Calculate the 90-day window for the prompt
+    # Dynamic 90-day window for the AI prompt
     today = datetime.now()
     future_date = today + timedelta(days=90)
     range_str = f"{today.strftime('%B %Y')} to {future_date.strftime('%B %Y')}"
     
     try:
-        page.goto(url, wait_until="load", timeout=90000)
+        # 1. Wait for the initial shell to load
+        page.goto(url, wait_until="domcontentloaded", timeout=90000)
         
         if mode == "specific" and zip_code:
             try:
@@ -215,36 +227,45 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
             except: pass
 
         if mode != "specific":
-            # Jittered scrolling to mimic a human user
-            for _ in range(5):
-                page.evaluate(f"window.scrollBy(0, {random.randint(600, 900)})")
-                time.sleep(random.uniform(1.0, 2.5))
+            # 2. Human-like scrolling to trigger lazy-loaded museum components
+            for _ in range(6):
+                page.evaluate(f"window.scrollBy(0, {random.randint(500, 850)})")
+                time.sleep(random.uniform(1.0, 2.0))
             
-            print(f"   ⏳ Deep-waiting for {master['name']} dynamic data...")
-            time.sleep(10) 
+            # 3. The 'Museum Buffer' - 12s allows heavy API data to render
+            print(f"   ⏳ Deep-waiting 12s for {master['name']} dynamic calendar...")
+            time.sleep(12) 
             page.screenshot(path=f"debug_{re.sub(r'\W+', '', master['name'])}.png")
 
-        # Capture the full visible text
-        text = page.evaluate("document.body.innerText")
+        # 4. DEEP-SCAN: Capture text from the main page AND all nested Iframes
+        # This is where the 'hidden' museum calendars are usually found
+        all_text_fragments = []
+        for frame in page.frames:
+            try:
+                f_text = frame.evaluate("document.body.innerText")
+                if f_text and len(f_text) > 20:
+                    all_text_fragments.append(f_text)
+            except: continue
+        combined_text = "\n---\n".join(all_text_fragments)
         
-        # IMPROVEMENT 4 (REFIXED): The Dynamic 90-Day Window
+        # 5. Targeted AI Prompt using the calculated date range
         prompt = f"""
         Today is {today.strftime('%B %d, %Y')}. 
-        Extract ALL upcoming public events and programs for {master['name']} occurring between {range_str}.
-        Look for dates, times, and titles in the text.
+        Find ALL upcoming public events, family programs, or festivals for {master['name']} between {range_str}.
         Output a JSON list with: "title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location".
         Rules:
-        1. Use the year 2026.
+        1. Use year 2026.
         2. If specific 'kids' events aren't found, include general family-friendly programs.
-        3. Return ONLY the JSON list inside []. If none found, return [].
+        3. Return ONLY the JSON list []. If truly none found, return [].
         """
         
-        events = generate_with_retry(prompt, text, master['name'])
+        events = generate_with_retry(prompt, combined_text, master['name'])
 
         if events:
             save_events(events, target_branches, midnight, master, mode)
+            print(f"   ✅ Successfully saved {len(events)} events for {master['name']}.")
         else:
-            print(f"   ⚠️ Gemini found no events for {master['name']} in the {range_str} window.")
+            print(f"   ⚠️ Gemini found 0 events for {master['name']} in the scraped text.")
             
     except Exception as e:
         print(f"❌ Error scraping {master['name']}: {e}")
