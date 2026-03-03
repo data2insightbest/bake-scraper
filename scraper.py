@@ -277,59 +277,58 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
-    today = datetime.now()
-    future_date = today + timedelta(days=90)
-    range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
-    
-    try:
-        # STEALTH: Mask the bot identity
-        page.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        })
+    # Store background API responses here
+    captured_json = []
 
-        print(f"📡 Navigating to: {url}")
+    def handle_response(response):
+        # We listen for any background data that looks like event lists
+        if "json" in response.headers.get("content-type", ""):
+            try:
+                # We only care about data from the museum's own domain or event providers
+                if any(x in response.url for x in ["calacademy", "sfzoo", "api", "events"]):
+                    captured_json.append(response.json())
+            except: pass
+
+    page.on("response", handle_response)
+
+    try:
+        # 1. HIDE THE BOT FLAG
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        print(f"📡 Deep-scanning: {url}")
+        # Wait for network to be totally quiet
         page.goto(url, wait_until="networkidle", timeout=60000)
         
-        # STEALTH: Clear overlays (Cookie banners)
-        try:
-            page.locator("button:has-text('Accept'), button:has-text('Agree')").first.click(timeout=5000)
-        except: pass
+        # 2. TRIGGER THE DATA (Human Scroll)
+        for _ in range(12):
+            page.mouse.wheel(0, 400)
+            time.sleep(0.5)
 
-        # STEALTH: Human-mimic scroll and hover
-        for _ in range(8):
-            page.mouse.wheel(0, 500)
-            time.sleep(1.2)
-            page.mouse.move(random.randint(100, 600), random.randint(100, 600))
-
-        time.sleep(5) # Final settle time
+        # 3. CONSOLIDATE DATA
+        page_text = page.evaluate("document.body.innerText")
         
-        # DEEP-SCAN: Pierce the Shadow DOM
-        raw_content = page.evaluate("""() => {
-            let texts = [document.body.innerText];
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-            let node;
-            while (node = walker.nextNode()) {
-                if (node.shadowRoot) texts.push(node.shadowRoot.textContent);
-            }
-            return texts.join('\\n');
-        }""")
+        # Combine the text we see with the raw data we caught in the background
+        combined_context = f"PAGE TEXT:\n{page_text}\n\nRAW API DATA:\n{json.dumps(captured_json)[:20000]}"
+        
+        today = datetime.now()
+        range_str = f"{today.strftime('%B %d, %Y')} to {(today + timedelta(days=90)).strftime('%B %d, %Y')}"
 
-        # PROMPT: The 90-day logic
         prompt = f"""
         Today is {today.strftime('%B %d, %Y')}. 
-        Find ALL events/programs for {master['name']} between {range_str}.
-        Look for "New and Featured", "Exhibits", and "Daily Programs".
-        Output JSON: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
+        Analyze the provided page text and background API data for {master['name']}.
+        Extract ALL public events and special exhibits for the window: {range_str}.
+        Return ONLY a JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location"].
         Rules: Use year 2026. Return [] if none.
         """
         
-        events = generate_with_retry(prompt, raw_content, master['name'])
+        events = generate_with_retry(prompt, combined_context, master['name'])
 
         if events:
             save_events(events, target_branches, midnight, master, mode)
-            print(f"   ✅ SUCCESS: Saved {len(events)} events for {master['name']}.")
+            print(f"   ✅ SUCCESS: Captured {len(events)} events (included API data).")
         else:
-            print(f"   ⚠️ No events found. Content Length: {len(raw_content)} characters.")
+            print(f"   ⚠️ Still 0 events. Page Text Length: {len(page_text)} | API Packets: {len(captured_json)}")
+            page.screenshot(path=f"FINAL_DEBUG_{master['id']}.png")
             
     except Exception as e:
         print(f"❌ Error: {e}")
