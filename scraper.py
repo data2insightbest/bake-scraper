@@ -277,61 +277,68 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
-    # Store background API responses here
-    captured_json = []
+    # 👂 This is the secret: Listen for the raw data packets
+    captured_data = []
 
-    def handle_response(response):
-        # We listen for any background data that looks like event lists
+    def on_response(response):
+        # If the website fetches a JSON list of events, we grab it here
         if "json" in response.headers.get("content-type", ""):
             try:
-                # We only care about data from the museum's own domain or event providers
-                if any(x in response.url for x in ["calacademy", "sfzoo", "api", "events"]):
-                    captured_json.append(response.json())
+                # We only save data that looks like it's from the museum's domain
+                if any(domain in response.url for domain in ["calacademy", "sfzoo", "exploratorium"]):
+                    captured_data.append(response.json())
             except: pass
 
-    page.on("response", handle_response)
+    page.on("response", on_response)
 
     try:
-        # 1. HIDE THE BOT FLAG
+        # 🛡️ Stealth: Hide the "I am a bot" flag
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-        print(f"📡 Deep-scanning: {url}")
-        # Wait for network to be totally quiet
+        
+        print(f"📡 Investigating: {master['name']}...")
+        # Wait until the network is quiet (all data has finished downloading)
         page.goto(url, wait_until="networkidle", timeout=60000)
         
-        # 2. TRIGGER THE DATA (Human Scroll)
-        for _ in range(12):
-            page.mouse.wheel(0, 400)
-            time.sleep(0.5)
+        # 🖱️ Act like a human: Scroll and wait for 'Featured' items to appear
+        for _ in range(5):
+            page.mouse.wheel(0, 500)
+            time.sleep(1.5)
 
-        # 3. CONSOLIDATE DATA
-        page_text = page.evaluate("document.body.innerText")
-        
-        # Combine the text we see with the raw data we caught in the background
-        combined_context = f"PAGE TEXT:\n{page_text}\n\nRAW API DATA:\n{json.dumps(captured_json)[:20000]}"
-        
+        # Grab the visible text AND any Shadow DOM content (hidden widgets)
+        visual_text = page.evaluate("""() => {
+            let t = document.body.innerText;
+            document.querySelectorAll('*').forEach(el => {
+                if (el.shadowRoot) t += '\\n' + el.shadowRoot.textContent;
+            });
+            return t;
+        }""")
+
+        # 🧩 Combine visual text with the raw API data we intercepted
+        full_context = f"VISUAL TEXT:\n{visual_text}\n\nRAW DATA PACKETS:\n{json.dumps(captured_data)[:15000]}"
+
         today = datetime.now()
-        range_str = f"{today.strftime('%B %d, %Y')} to {(today + timedelta(days=90)).strftime('%B %d, %Y')}"
-
+        range_str = f"{today.strftime('%B %Y')} to {(today + timedelta(days=90)).strftime('%B %Y')}"
+        
+        # 🤖 The "Search Engine" Prompt
         prompt = f"""
-        Today is {today.strftime('%B %d, %Y')}. 
-        Analyze the provided page text and background API data for {master['name']}.
-        Extract ALL public events and special exhibits for the window: {range_str}.
-        Return ONLY a JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location"].
-        Rules: Use year 2026. Return [] if none.
+        I am giving you the raw data and text from {master['name']}. 
+        Find EVERY public event, workshop, and special exhibit in this data for {range_str}.
+        Focus specifically on 'Featured' and 'Upcoming' sections.
+        Return ONLY a JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
+        Rules: Use year 2026. If truly empty, return [].
         """
         
-        events = generate_with_retry(prompt, combined_context, master['name'])
+        events = generate_with_retry(prompt, full_context, master['name'])
 
         if events:
             save_events(events, target_branches, midnight, master, mode)
-            print(f"   ✅ SUCCESS: Captured {len(events)} events (included API data).")
+            print(f"   ✅ SUCCESS: Captured {len(events)} events for {master['name']}.")
         else:
-            print(f"   ⚠️ Still 0 events. Page Text Length: {len(page_text)} | API Packets: {len(captured_json)}")
-            page.screenshot(path=f"FINAL_DEBUG_{master['id']}.png")
+            print(f"   ⚠️ Gemini analyzed {len(full_context)} chars but found 0 events.")
+            page.screenshot(path=f"debug_ID{master['id']}.png")
             
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Error during smart-scrape: {e}")
     finally:
         page.close()
         
