@@ -130,7 +130,7 @@ def get_daily_batch(limit=24):
     # We remove the three_days_ago filter to ensure we grab these 5 regardless of status
     res = supabase.table("places")\
         .select("*")\
-        .in_("id", [1, 2, 3, 4, 5])\
+        .in_("id", [1])\
         .order("id")\
         .limit(limit)\
         .execute()
