@@ -277,68 +277,44 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
-    # 👂 This is the secret: Listen for the raw data packets
-    captured_data = []
-
-    def on_response(response):
-        # If the website fetches a JSON list of events, we grab it here
-        if "json" in response.headers.get("content-type", ""):
-            try:
-                # We only save data that looks like it's from the museum's domain
-                if any(domain in response.url for domain in ["calacademy", "sfzoo", "exploratorium"]):
-                    captured_data.append(response.json())
-            except: pass
-
-    page.on("response", on_response)
-
     try:
-        # 🛡️ Stealth: Hide the "I am a bot" flag
-        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        print(f"📡 Deep-Scanning: {master['name']} ({url})")
+        # 'commit' waits for the first chunk of data, then we manually wait for JS
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        print(f"📡 Investigating: {master['name']}...")
-        # Wait until the network is quiet (all data has finished downloading)
-        page.goto(url, wait_until="networkidle", timeout=60000)
-        
-        # 🖱️ Act like a human: Scroll and wait for 'Featured' items to appear
+        # Act like a human: Scroll, pause, scroll
         for _ in range(5):
-            page.mouse.wheel(0, 500)
-            time.sleep(1.5)
+            page.mouse.wheel(0, 800)
+            time.sleep(2) 
 
-        # Grab the visible text AND any Shadow DOM content (hidden widgets)
-        visual_text = page.evaluate("""() => {
-            let t = document.body.innerText;
-            document.querySelectorAll('*').forEach(el => {
-                if (el.shadowRoot) t += '\\n' + el.shadowRoot.textContent;
-            });
-            return t;
-        }""")
-
-        # 🧩 Combine visual text with the raw API data we intercepted
-        full_context = f"VISUAL TEXT:\n{visual_text}\n\nRAW DATA PACKETS:\n{json.dumps(captured_data)[:15000]}"
+        # 🧠 THE STRATEGY: Grab the RAW HTML + INNER TEXT
+        # This ensures Gemini sees 'hidden' attributes and data-tags
+        dom_content = page.evaluate("() => document.documentElement.outerHTML")
+        visible_text = page.evaluate("() => document.body.innerText")
+        
+        # Combine them but truncate to keep within Gemini's limit
+        combined_data = f"VISIBLE TEXT:\n{visible_text[:5000]}\n\nRAW HTML SNIPPET:\n{dom_content[:15000]}"
 
         today = datetime.now()
         range_str = f"{today.strftime('%B %Y')} to {(today + timedelta(days=90)).strftime('%B %Y')}"
         
-        # 🤖 The "Search Engine" Prompt
         prompt = f"""
-        I am giving you the raw data and text from {master['name']}. 
-        Find EVERY public event, workshop, and special exhibit in this data for {range_str}.
-        Focus specifically on 'Featured' and 'Upcoming' sections.
-        Return ONLY a JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
-        Rules: Use year 2026. If truly empty, return [].
+        Analyze this website data for {master['name']}. 
+        Identify ALL upcoming special exhibits, 'New & Featured' events, and family programs for {range_str}.
+        Return a JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
+        Rules: Year 2026. If none, return [].
         """
         
-        events = generate_with_retry(prompt, full_context, master['name'])
+        events = generate_with_retry(prompt, combined_data, master['name'])
 
         if events:
             save_events(events, target_branches, midnight, master, mode)
-            print(f"   ✅ SUCCESS: Captured {len(events)} events for {master['name']}.")
+            print(f"   ✅ SUCCESS: Found {len(events)} events for {master['name']}.")
         else:
-            print(f"   ⚠️ Gemini analyzed {len(full_context)} chars but found 0 events.")
-            page.screenshot(path=f"debug_ID{master['id']}.png")
+            print(f"   ⚠️ Gemini found 0 events in the HTML/Text for {master['name']}.")
             
     except Exception as e:
-        print(f"❌ Error during smart-scrape: {e}")
+        print(f"❌ Error: {e}")
     finally:
         page.close()
         
@@ -395,5 +371,30 @@ def run_scraper():
         browser.close()
     run_gemini_discovery(midnight_today)
 
+#if __name__ == "__main__":
+#    run_scraper()
 if __name__ == "__main__":
-    run_scraper()
+    midnight = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
+    
+    # 1. COMMENT THIS OUT FOR NOW - It is blocking your script
+    # print(f"🧠 Running Discovery...")
+    # run_gemini_discovery(midnight)
+
+    # 2. RUN THE TARGETED SCRAPE IMMEDIATELY
+    print("🚀 STARTING TARGETED TEST FOR IDs 1-5...")
+    
+    # Force reset so they aren't skipped
+    supabase.table("places").update({"last_scraped_at": None}).in_("id", [1, 2, 3, 4, 5]).execute()
+    
+    batch = get_daily_batch() # This should return IDs 1-5
+    if batch:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            # Use Mobile Emulation (Museums often have lighter bot-walls for mobile)
+            context = browser.new_context(**p.devices['iPhone 13']) 
+            
+            for master in batch:
+                # Get the branch info
+                res = supabase.table("places").select("*").eq("master_id", master['id']).execute()
+                scrape_and_save(context, master, res.data, "mapping", midnight)
+            browser.close()
