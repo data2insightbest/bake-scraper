@@ -144,15 +144,11 @@ def save_events(events, target_branches, midnight, master, mode):
     official_cat = master.get('category', 'Activity') if isinstance(master, dict) else master
     b_ids = [int(b['id']) for b in target_branches]
     
-    # Pre-clean existing records
+    # 1. Clear existing for this run
     supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
 
-    # 1. TRACE: Frequency Calculation
-    # We count occurrences of each title to find 'Common' vs 'Rare' events
-    title_counts = {}
-    for ev in events:
-        t = ev['title'].lower()
-        title_counts[t] = title_counts.get(t, 0) + 1
+    title_counts = {ev['title'].lower(): 0 for ev in events}
+    for ev in events: title_counts[ev['title'].lower()] += 1
 
     special_keywords = ["festival", "annual", "holiday", "celebration", "fair", "parade"]
 
@@ -162,45 +158,42 @@ def save_events(events, target_branches, midnight, master, mode):
         title_low = ev['title'].lower()
         count = title_counts.get(title_low, 1)
         
-        # 2. TRACE: Implement the Specificity Score
-        # RARE titles (count=1) get high scores. 
-        # COMMON titles (count > 2) get low scores.
-        if count == 1:
-            # It's unique in this batch!
-            spec_score = random.randint(8, 10)
-        elif count == 2:
-            # Semi-unique (maybe 2 branches have it)
-            spec_score = random.randint(5, 7)
-        else:
-            # Common/Recurring (Home Depot, Storytimes, etc.)
-            spec_score = random.randint(1, 4)
+        # Specificity Logic (Your existing logic is good)
+        if count == 1: spec_score = random.randint(8, 10)
+        elif count == 2: spec_score = random.randint(5, 7)
+        else: spec_score = random.randint(1, 4)
 
-        # 3. TRACE: Keyword Override
-        # Even if it's common, if it's a 'Festival', boost it.
         if any(kw in title_low for kw in special_keywords):
             spec_score = min(10, spec_score + 5)
 
         window = calculate_window(ev['event_date'])
 
         for branch in target_branches:
-            should_add = (mode in ["global", "specific"])
-            if mode == "mapping":
+            # FIX: If we only have 1 branch (Museum), bypass the name-matching 'mapping' check
+            should_add = (mode in ["global", "specific"]) or (len(target_branches) == 1)
+            
+            if mode == "mapping" and not should_add:
                 loc_hint = str(ev.get('found_location', '')).lower()
                 b_clean = branch['name'].lower().replace("library", "").strip()
                 if b_clean and (b_clean in loc_hint or b_clean in title_low):
                     should_add = True
             
             if should_add:
-                entry = ev.copy()
-                entry.pop('found_location', None)
-                entry.update({
+                # FIX: Build a clean row to avoid "column does not exist" errors
+                entry = {
+                    'title': ev.get('title'),
+                    'event_date': ev.get('event_date'),
+                    'snippet': ev.get('snippet', ''),
+                    'price_text': ev.get('price_text', ''),
                     'category_name': official_cat,
                     'specificity_score': spec_score,
                     'window_type': window,
-                    'place_id': branch['id'], 
-                    'place_name': branch['name'], 
-                    'zip_code': branch['zip_code']
-                })
+                    'place_id': branch['id'],
+                    'zip_code': branch.get('zip_code')
+                }
+                
+                # Debug print to confirm it's actually hitting the DB
+                print(f"      💾 Saving to DB: {entry['title']}")
                 supabase.table("events").insert(entry).execute()
                 
 # --- Scraper Pathway ---
@@ -279,39 +272,60 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     
     try:
         print(f"📡 Deep-Scanning: {master['name']} ({url})")
-        # 'commit' waits for the first chunk of data, then we manually wait for JS
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # 1. Use 'networkidle' to ensure the 'Featured' cards actually arrive
+        page.goto(url, wait_until="networkidle", timeout=60000)
         
-        # Act like a human: Scroll, pause, scroll
-        for _ in range(5):
+        # 2. Aggressive Human Scroll
+        # We scroll further down because 'Featured' items are often at the bottom
+        for _ in range(8):
             page.mouse.wheel(0, 800)
-            time.sleep(2) 
+            time.sleep(1.5) 
 
-        # 🧠 THE STRATEGY: Grab the RAW HTML + INNER TEXT
-        # This ensures Gemini sees 'hidden' attributes and data-tags
-        dom_content = page.evaluate("() => document.documentElement.outerHTML")
-        visible_text = page.evaluate("() => document.body.innerText")
+        # 3. THE FIX: High-Density Extraction
+        # We grab visible text PLUS all 'aria-labels' and 'alt' texts where dates/titles hide
+        combined_data = page.evaluate("""() => {
+            let results = "VISIBLE TEXT:\\n" + document.body.innerText;
+            results += "\\n\\nHIDDEN ATTRIBUTES:\\n";
+            // Find all elements that might be event cards
+            const elements = document.querySelectorAll('a, button, [role="button"], img, h3, h4');
+            elements.forEach(el => {
+                const label = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt');
+                if (label) results += label + " | ";
+            });
+            return results;
+        }""")
+
+        # 4. Check for Shadow DOM (used by CalAcademy widgets)
+        shadow_data = page.evaluate("""() => {
+            let txt = "";
+            document.querySelectorAll('*').forEach(el => {
+                if (el.shadowRoot) txt += el.shadowRoot.textContent + "\\n";
+            });
+            return txt;
+        }""")
         
-        # Combine them but truncate to keep within Gemini's limit
-        combined_data = f"VISIBLE TEXT:\n{visible_text[:5000]}\n\nRAW HTML SNIPPET:\n{dom_content[:15000]}"
+        final_context = f"{combined_data}\n\nSHADOW CONTENT:\n{shadow_data}"
 
         today = datetime.now()
         range_str = f"{today.strftime('%B %Y')} to {(today + timedelta(days=90)).strftime('%B %Y')}"
         
         prompt = f"""
-        Analyze this website data for {master['name']}. 
+        Analyze this data for {master['name']}. 
         Identify ALL upcoming special exhibits, 'New & Featured' events, and family programs for {range_str}.
+        Look for titles, dates (March-June 2026), and descriptions.
         Return a JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
-        Rules: Year 2026. If none, return [].
+        Rules: Use year 2026. If truly none, return [].
         """
         
-        events = generate_with_retry(prompt, combined_data, master['name'])
+        events = generate_with_retry(prompt, final_context, master['name'])
 
         if events:
             save_events(events, target_branches, midnight, master, mode)
             print(f"   ✅ SUCCESS: Found {len(events)} events for {master['name']}.")
         else:
-            print(f"   ⚠️ Gemini found 0 events in the HTML/Text for {master['name']}.")
+            # This helps us debug why it failed
+            print(f"   ⚠️ Gemini found 0 events. Data Length: {len(final_context)} chars.")
+            page.screenshot(path=f"debug_ID{master['id']}.png")
             
     except Exception as e:
         print(f"❌ Error: {e}")
