@@ -376,25 +376,33 @@ def run_scraper():
 if __name__ == "__main__":
     midnight = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
     
-    # 1. COMMENT THIS OUT FOR NOW - It is blocking your script
-    # print(f"🧠 Running Discovery...")
-    # run_gemini_discovery(midnight)
-
-    # 2. RUN THE TARGETED SCRAPE IMMEDIATELY
     print("🚀 STARTING TARGETED TEST FOR IDs 1-5...")
     
-    # Force reset so they aren't skipped
-    supabase.table("places").update({"last_scraped_at": None}).in_("id", [1, 2, 3, 4, 5]).execute()
-    
-    batch = get_daily_batch() # This should return IDs 1-5
+    # Force reset so they aren't skipped by the 'last_scraped_at' filter
+    try:
+        supabase.table("places").update({"last_scraped_at": None}).in_("id", [1, 2, 3, 4, 5]).execute()
+    except Exception as e:
+        print(f"⚠️ Note: Could not reset timestamps: {e}")
+
+    # Fetch IDs 1-5 directly
+    res = supabase.table("places").select("*").in_("id", [1, 2, 3, 4, 5]).execute()
+    batch = res.data
+
     if batch:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            # Use Mobile Emulation (Museums often have lighter bot-walls for mobile)
-            context = browser.new_context(**p.devices['iPhone 13']) 
+            # Launch with 'Stealth' mode enabled
+            browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+            
+            # Use a Desktop context to ensure the 'Exhibits' layout is full-width
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
             
             for master in batch:
-                # Get the branch info
-                res = supabase.table("places").select("*").eq("master_id", master['id']).execute()
-                scrape_and_save(context, master, res.data, "mapping", midnight)
+                # We pass [master] as the 'target_branches' because in your current 
+                # setup, the master IS the place we want to save to.
+                scrape_and_save(context, master, [master], "mapping", midnight)
+            
             browser.close()
+    else:
+        print("❌ Could not find IDs 1-5 in the places table.")
