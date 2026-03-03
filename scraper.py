@@ -272,7 +272,7 @@ def save_events(events, target_branches, midnight, master, mode):
 #        print(f"❌ Error scraping {master['name']}: {e}")
 #    finally:
 #        page.close()
-     
+
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
@@ -282,54 +282,57 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
     
     try:
-        # 1. Wait for network to settle (Universal for SPAs and Museums)
+        # STEALTH: Mask the bot identity
+        page.set_extra_http_headers({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        })
+
         print(f"📡 Navigating to: {url}")
-        page.goto(url, wait_until="networkidle", timeout=90000)
+        page.goto(url, wait_until="networkidle", timeout=60000)
         
-        # 2. Universal Human-Mimic Scroll
-        # This triggers 'Featured' cards in museums AND 'Load More' in workshops
-        for _ in range(10):
+        # STEALTH: Clear overlays (Cookie banners)
+        try:
+            page.locator("button:has-text('Accept'), button:has-text('Agree')").first.click(timeout=5000)
+        except: pass
+
+        # STEALTH: Human-mimic scroll and hover
+        for _ in range(8):
             page.mouse.wheel(0, 500)
-            time.sleep(1.0) 
+            time.sleep(1.2)
+            page.mouse.move(random.randint(100, 600), random.randint(100, 600))
 
-        # 3. Deep-Scan Technology
-        # Pierces through Shadow DOM (Museums) and collects Iframe text (Workshop widgets)
-        raw_content = page.evaluate("""() => {
-            let allText = document.body.innerText;
-            // Scan for Shadow Roots (Common in modern React/Vue museum sites)
-            const hosts = Array.from(document.querySelectorAll('*')).filter(el => el.shadowRoot);
-            hosts.forEach(h => { allText += '\\n' + h.shadowRoot.textContent; });
-            return allText;
-        }""")
+        time.sleep(5) # Final settle time
         
-        for frame in page.frames:
-            try:
-                f_text = frame.evaluate("document.body.innerText")
-                if len(f_text) > 50: raw_content += f"\\n---\\n{f_text}"
-            except: continue
+        # DEEP-SCAN: Pierce the Shadow DOM
+        raw_content = page.evaluate("""() => {
+            let texts = [document.body.innerText];
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+            let node;
+            while (node = walker.nextNode()) {
+                if (node.shadowRoot) texts.push(node.shadowRoot.textContent);
+            }
+            return texts.join('\\n');
+        }""")
 
-        page.screenshot(path=f"debug_{re.sub(r'\W+', '', master['name'])}.png")
-
-        # 4. Global Intelligence Prompt
-        # Instructs Gemini to look for BOTH formal workshops and 'Featured' museum events
+        # PROMPT: The 90-day logic
         prompt = f"""
         Today is {today.strftime('%B %d, %Y')}. 
-        Find ALL public activities for {master['name']} between {range_str}.
-        Look for: 'Workshops', 'Featured Events', 'Exhibits', 'Daily Programs', or 'Festivals'.
-        Output JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
-        Rules: Use year 2026. Return [] if none found.
+        Find ALL events/programs for {master['name']} between {range_str}.
+        Look for "New and Featured", "Exhibits", and "Daily Programs".
+        Output JSON: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
+        Rules: Use year 2026. Return [] if none.
         """
         
         events = generate_with_retry(prompt, raw_content, master['name'])
 
         if events:
             save_events(events, target_branches, midnight, master, mode)
-            print(f"   ✅ Saved {len(events)} events for {master['name']}.")
+            print(f"   ✅ SUCCESS: Saved {len(events)} events for {master['name']}.")
         else:
-            print(f"   ⚠️ Gemini found 0 events for {master['name']}. Check screenshot.")
+            print(f"   ⚠️ No events found. Content Length: {len(raw_content)} characters.")
             
     except Exception as e:
-        print(f"❌ Error scraping {master['name']}: {e}")
+        print(f"❌ Error: {e}")
     finally:
         page.close()
         
