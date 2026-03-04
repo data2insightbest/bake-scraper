@@ -137,65 +137,73 @@ def get_daily_batch(limit=24):
     return res.data
      
 # --- Business Logic & Saving ---
-
 def save_events(events, target_branches, midnight, master, mode):
-    if not events: return
+    if not events: 
+        print(f"   ⚠️ save_events received empty list for {master.get('name')}")
+        return
     
-    official_cat = master.get('category', 'Activity') if isinstance(master, dict) else master
+    # Ensure master is a dict
+    m_name = master.get('name', 'Unknown')
+    official_cat = master.get('category', 'Activity')
     b_ids = [int(b['id']) for b in target_branches]
     
-    # 1. Clear existing for this run
-    supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
+    print(f"   💾 Attempting to save {len(events)} events to database...")
 
-    title_counts = {ev['title'].lower(): 0 for ev in events}
-    for ev in events: title_counts[ev['title'].lower()] += 1
-
-    special_keywords = ["festival", "annual", "holiday", "celebration", "fair", "parade"]
+    # 1. Clear existing records for these IDs
+    try:
+        supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
+    except Exception as e:
+        print(f"   ❌ Delete Error: {e}")
 
     for ev in events:
         if not is_valid_date(ev.get('event_date')): continue
         
-        title_low = ev['title'].lower()
-        count = title_counts.get(title_low, 1)
-        
-        # Specificity Logic (Your existing logic is good)
-        if count == 1: spec_score = random.randint(8, 10)
-        elif count == 2: spec_score = random.randint(5, 7)
-        else: spec_score = random.randint(1, 4)
-
-        if any(kw in title_low for kw in special_keywords):
-            spec_score = min(10, spec_score + 5)
-
+        # Determine Window and Scores
         window = calculate_window(ev['event_date'])
-
+        
         for branch in target_branches:
-            # FIX: If we only have 1 branch (Museum), bypass the name-matching 'mapping' check
+            # FIX: If we only have 1 branch (Museum), we bypass the 'mapping' name-check
             should_add = (mode in ["global", "specific"]) or (len(target_branches) == 1)
             
             if mode == "mapping" and not should_add:
                 loc_hint = str(ev.get('found_location', '')).lower()
                 b_clean = branch['name'].lower().replace("library", "").strip()
-                if b_clean and (b_clean in loc_hint or b_clean in title_low):
+                if b_clean and (b_clean in loc_hint or ev['title'].lower()):
                     should_add = True
             
             if should_add:
-                # FIX: Build a clean row to avoid "column does not exist" errors
+                # 2. Build a MINIMAL row first to ensure it passes database constraints
                 entry = {
+                    'place_id': branch['id'],
                     'title': ev.get('title'),
                     'event_date': ev.get('event_date'),
                     'snippet': ev.get('snippet', ''),
-                    'price_text': ev.get('price_text', ''),
+                    'price_text': ev.get('price_text', 'Check website'),
                     'category_name': official_cat,
-                    'specificity_score': spec_score,
-                    'window_type': window,
-                    'place_id': branch['id'],
                     'zip_code': branch.get('zip_code')
                 }
                 
-                # Debug print to confirm it's actually hitting the DB
-                print(f"      💾 Saving to DB: {entry['title']}")
-                supabase.table("events").insert(entry).execute()
-                
+                # Try to add extra metadata if columns exist
+                try:
+                    entry['specificity_score'] = random.randint(7, 10)
+                    entry['window_type'] = window
+                except: pass
+
+                try:
+                    res = supabase.table("events").insert(entry).execute()
+                    if res.data:
+                        print(f"      ✅ Saved: {ev['title']}")
+                except Exception as e:
+                    print(f"      ❌ DB Insert Fail for '{ev['title']}': {e}")
+
+    # 3. CRITICAL: Update the place table so we know it worked
+    try:
+        now_str = datetime.now().isoformat()
+        supabase.table("places").update({"last_scraped_at": now_str}).eq("id", master['id']).execute()
+        print(f"   🕒 Updated last_scraped_at for {m_name}")
+    except Exception as e:
+        print(f"   ❌ Failed to update timestamp: {e}")
+        
 # --- Scraper Pathway ---
 # this function works for the category of workshop, but not others
 #def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
