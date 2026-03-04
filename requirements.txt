@@ -3,3 +3,4 @@ google-genai
 supabase
 beautifulsoup4
 requests
+python-dateutil
