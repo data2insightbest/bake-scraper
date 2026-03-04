@@ -82,9 +82,28 @@ def clean_html(raw_html):
         element.decompose()
     return soup.get_text(separator=' ', strip=True)
 
-def is_valid_date(date_str):
-    return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
+#def is_valid_date(date_str):
+#    return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
 
+from dateutil import parser # Ensure 'python-dateutil' is in your requirements.txt
+def is_valid_date(date_str):
+    """
+    Attempts to normalize any date string into YYYY-MM-DD.
+    Returns the string if valid, or None if it's junk.
+    """
+    if not date_str or not isinstance(date_str, str):
+        return None
+    
+    try:
+        # This handles "March 15 2026", "2026/03/15", "03-15-2026", etc.
+        parsed_date = parser.parse(date_str)
+        # Ensure it's not in the past
+        if parsed_date.year < 2024: 
+            return None
+        return parsed_date.strftime('%Y-%m-%d')
+    except (ValueError, TypeError):
+        return None
+        
 def generate_with_retry(prompt, text_content, context_name="General"):
     """Centralized AI call logic with linear backoff (12s/24s/36s)."""
     for attempt in range(3):
@@ -138,71 +157,81 @@ def get_daily_batch(limit=24):
      
 # --- Business Logic & Saving ---
 def save_events(events, target_branches, midnight, master, mode):
-    if not events: 
-        print(f"   ⚠️ save_events received empty list for {master.get('name')}")
+    """
+    Saves events to Supabase with a bypass for single-branch places (Museums).
+    """
+    if not events:
+        print(f"   ⚠️ No events list provided to save_events for {master.get('name')}")
+        # Even if empty, we update the timestamp to show we checked it
+        try:
+            supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
+        except: pass
         return
-    
-    # Ensure master is a dict
-    m_name = master.get('name', 'Unknown')
-    official_cat = master.get('category', 'Activity')
-    b_ids = [int(b['id']) for b in target_branches]
-    
-    print(f"   💾 Attempting to save {len(events)} events to database...")
 
-    # 1. Clear existing records for these IDs
+    official_cat = master.get('category', 'Special Activity')
+    m_id = master['id']
+    m_name = master.get('name', 'Unknown Place')
+
+    print(f"   💾 Attempting to save {len(events)} events for {m_name}...")
+
+    # 1. CLEANUP: Delete old events for this place from today onwards
     try:
-        supabase.table("events").delete().in_("place_id", b_ids).gte("event_date", midnight).execute()
+        supabase.table("events").delete().eq("place_id", m_id).gte("event_date", midnight).execute()
     except Exception as e:
-        print(f"   ❌ Delete Error: {e}")
+        print(f"   ❌ Cleanup failed: {e}")
 
     for ev in events:
-        if not is_valid_date(ev.get('event_date')): continue
-        
-        # Determine Window and Scores
-        window = calculate_window(ev['event_date'])
-        
+        # 2. DATE NORMALIZATION
+        # We use our new 'forgiving' date checker
+        clean_date = is_valid_date(ev.get('event_date'))
+        if not clean_date:
+            print(f"      ⏩ Skipping '{ev.get('title')}' due to invalid date: {ev.get('event_date')}")
+            continue
+
         for branch in target_branches:
-            # FIX: If we only have 1 branch (Museum), we bypass the 'mapping' name-check
-            should_add = (mode in ["global", "specific"]) or (len(target_branches) == 1)
+            # 3. THE MUSEUM BYPASS
+            # If we only have 1 branch, we DON'T check if the name matches. 
+            # We trust that the scraper found it on the museum's own site.
+            is_single_place = (len(target_branches) == 1)
             
-            if mode == "mapping" and not should_add:
+            should_add = False
+            if is_single_place or mode != "mapping":
+                should_add = True
+            else:
+                # This part is for Libraries/Parks with many branches
                 loc_hint = str(ev.get('found_location', '')).lower()
-                b_clean = branch['name'].lower().replace("library", "").strip()
-                if b_clean and (b_clean in loc_hint or ev['title'].lower()):
+                b_name = branch['name'].lower().replace("library", "").strip()
+                if b_name in loc_hint or b_name in ev['title'].lower():
                     should_add = True
-            
+
             if should_add:
-                # 2. Build a MINIMAL row first to ensure it passes database constraints
+                # 4. PREPARE ENTRY
                 entry = {
                     'place_id': branch['id'],
                     'title': ev.get('title'),
-                    'event_date': ev.get('event_date'),
+                    'event_date': clean_date,
                     'snippet': ev.get('snippet', ''),
                     'price_text': ev.get('price_text', 'Check website'),
                     'category_name': official_cat,
-                    'zip_code': branch.get('zip_code')
+                    'zip_code': branch.get('zip_code'),
+                    'is_featured': True
                 }
-                
-                # Try to add extra metadata if columns exist
-                try:
-                    entry['specificity_score'] = random.randint(7, 10)
-                    entry['window_type'] = window
-                except: pass
 
+                # 5. INSERT WITH TRACE
                 try:
                     res = supabase.table("events").insert(entry).execute()
                     if res.data:
-                        print(f"      ✅ Saved: {ev['title']}")
+                        print(f"      ✅ SUCCESS: Saved '{entry['title']}' for {clean_date}")
                 except Exception as e:
-                    print(f"      ❌ DB Insert Fail for '{ev['title']}': {e}")
+                    print(f"      ❌ DB INSERT ERROR for '{entry['title']}': {e}")
 
-    # 3. CRITICAL: Update the place table so we know it worked
+    # 6. UPDATE PLACE TIMESTAMP
     try:
         now_str = datetime.now().isoformat()
-        supabase.table("places").update({"last_scraped_at": now_str}).eq("id", master['id']).execute()
-        print(f"   🕒 Updated last_scraped_at for {m_name}")
+        supabase.table("places").update({"last_scraped_at": now_str}).eq("id", m_id).execute()
+        print(f"   🕒 Place {m_id} timestamp updated.")
     except Exception as e:
-        print(f"   ❌ Failed to update timestamp: {e}")
+        print(f"   ❌ Failed to update place timestamp: {e}")
         
 # --- Scraper Pathway ---
 # this function works for the category of workshop, but not others
@@ -279,64 +308,49 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
     try:
-        print(f"📡 Deep-Scanning: {master['name']} ({url})")
-        # 1. Use 'networkidle' to ensure the 'Featured' cards actually arrive
-        page.goto(url, wait_until="networkidle", timeout=60000)
+        print(f"📡 Scoping ID {master['id']}: {master['name']}")
         
-        # 2. Aggressive Human Scroll
-        # We scroll further down because 'Featured' items are often at the bottom
-        for _ in range(8):
-            page.mouse.wheel(0, 800)
-            time.sleep(1.5) 
+        # Navigate and wait for content
+        response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        
+        if response.status >= 400:
+            print(f"   ⚠️ Site returned error status {response.status}. Skipping.")
+            return
 
-        # 3. THE FIX: High-Density Extraction
-        # We grab visible text PLUS all 'aria-labels' and 'alt' texts where dates/titles hide
-        combined_data = page.evaluate("""() => {
-            let results = "VISIBLE TEXT:\\n" + document.body.innerText;
-            results += "\\n\\nHIDDEN ATTRIBUTES:\\n";
-            // Find all elements that might be event cards
-            const elements = document.querySelectorAll('a, button, [role="button"], img, h3, h4');
-            elements.forEach(el => {
-                const label = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt');
-                if (label) results += label + " | ";
-            });
-            return results;
+        # Mimic human pause
+        time.sleep(3)
+        page.mouse.wheel(0, 1000)
+        time.sleep(2)
+
+        # Get the most reliable data source: InnerText + Meta Tags
+        raw_data = page.evaluate("""() => {
+            return document.title + "\\n" + 
+                   document.body.innerText + "\\n" + 
+                   Array.from(document.querySelectorAll('meta[name="description"]')).map(m => m.content).join(" ");
         }""")
 
-        # 4. Check for Shadow DOM (used by CalAcademy widgets)
-        shadow_data = page.evaluate("""() => {
-            let txt = "";
-            document.querySelectorAll('*').forEach(el => {
-                if (el.shadowRoot) txt += el.shadowRoot.textContent + "\\n";
-            });
-            return txt;
-        }""")
-        
-        final_context = f"{combined_data}\n\nSHADOW CONTENT:\n{shadow_data}"
+        if len(raw_data) < 500:
+            print(f"   ⚠️ Data too short ({len(raw_data)} chars). Site likely blocked us.")
+            # We still update the timestamp so we don't get stuck in a loop
+            save_events([], target_branches, midnight, master, mode)
+            return
 
         today = datetime.now()
-        range_str = f"{today.strftime('%B %Y')} to {(today + timedelta(days=90)).strftime('%B %Y')}"
-        
         prompt = f"""
-        Analyze this data for {master['name']}. 
-        Identify ALL upcoming special exhibits, 'New & Featured' events, and family programs for {range_str}.
-        Look for titles, dates (March-June 2026), and descriptions.
-        Return a JSON list: ["title", "event_date", "category_name", "window_type", "price_text", "snippet", "found_location"].
-        Rules: Use year 2026. If truly none, return [].
+        Find all events/exhibits for {master['name']} in the text.
+        Window: March 2026 to June 2026.
+        If dates aren't clear, but it's a 'Featured Exhibit', assume it is active now.
+        JSON format: ["title", "event_date" (YYYY-MM-DD), "snippet", "price_text"].
         """
         
-        events = generate_with_retry(prompt, final_context, master['name'])
-
-        if events:
-            save_events(events, target_branches, midnight, master, mode)
-            print(f"   ✅ SUCCESS: Found {len(events)} events for {master['name']}.")
-        else:
-            # This helps us debug why it failed
-            print(f"   ⚠️ Gemini found 0 events. Data Length: {len(final_context)} chars.")
-            page.screenshot(path=f"debug_ID{master['id']}.png")
-            
+        events = generate_with_retry(prompt, raw_data, master['name'])
+        
+        # This will now ALWAYS call save_events, even if events is empty,
+        # ensuring the 'last_scraped_at' timestamp gets updated.
+        save_events(events or [], target_branches, midnight, master, mode)
+        
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"   ❌ Error in scrape logic for ID {master['id']}: {e}")
     finally:
         page.close()
         
