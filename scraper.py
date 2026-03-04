@@ -100,9 +100,8 @@ def is_valid_date(date_str):
         return None
 
 # --- Business Logic & Saving ---
-def save_events(events, target_branches, midnight, master, mode, window_label):
+def save_events(events, target_branches, midnight, master, mode):
     if not events:
-        print(f"   ⚠️ No events found for {master.get('name')}. Updating timestamp.")
         try:
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
         except: pass
@@ -110,50 +109,57 @@ def save_events(events, target_branches, midnight, master, mode, window_label):
 
     m_id = master['id']
     m_name = master.get('name', 'Unknown Place')
-    official_cat = master.get('category', 'Activity')
+    today = datetime.now().date()
 
-    print(f"   💾 Saving {len(events)} events for {m_name} as '{window_label}'...")
+    print(f"   💾 Categorizing and saving {len(events)} events for {m_name}...")
 
-    # Cleanup existing for this window
-    supabase.table("events").delete().eq("place_id", m_id).eq("window_type", window_label).gte("event_date", midnight).execute()
+    # Clear future events for this place to avoid duplicates
+    supabase.table("events").delete().eq("place_id", m_id).gte("event_date", today.isoformat()).execute()
 
     for ev in events:
-        clean_date = is_valid_date(ev.get('event_date'))
-        if not clean_date: continue
+        clean_date_str = is_valid_date(ev.get('event_date'))
+        if not clean_date_str: continue
+        
+        ev_dt = datetime.strptime(clean_date_str, '%Y-%m-%d').date()
+        days_away = (ev_dt - today).days
 
-        # --- SNIPPET CLEANUP ---
-        title = ev.get('title', 'Special Event')
+        # 1. Past Date Guard
+        if days_away < 0: continue
+
+        # 2. Dynamic Window Labeling (14 / 45 / 90)
+        if days_away <= 14:
+            window_label = "Daily Refresh"
+        elif days_away <= 45:
+            window_label = "Weekly Deep Dive"
+        elif days_away <= 90:
+            window_label = "Special Scout"
+        else:
+            continue # Skip anything over 90 days
+
+        # 3. Snippet Cleanup
+        title = ev.get('title', 'Featured Event')
         snippet = ev.get('snippet', '').strip()
-        # If snippet is just digits/dates or too short, replace with helpful text
-        is_bad_snippet = (len(snippet) < 20) or any(char.isdigit() for char in snippet[:10])
-        if is_bad_snippet or snippet == clean_date:
+        if len(snippet) < 15 or any(char.isdigit() for char in snippet[:10]):
             snippet = f"Featured program: {title} at {m_name}."
 
-        # --- SPECIFICITY SCORE ---
-        title_low = title.lower()
-        special_keywords = ["exhibit", "festival", "annual", "special", "workshop", "opening"]
-        is_special = any(kw in title_low for kw in special_keywords)
-        spec_score = random.randint(8, 10) if is_special else random.randint(4, 6)
-
         for branch in target_branches:
-            if len(target_branches) == 1 or mode != "mapping":
-                entry = {
-                    'place_id': branch['id'],
-                    'place_name': branch.get('name', m_name),
-                    'title': title,
-                    'event_date': clean_date,
-                    'snippet': snippet,
-                    'price_text': ev.get('price_text', 'Check website'),
-                    'category_name': official_cat,
-                    'zip_code': branch.get('zip_code'),
-                    'window_type': window_label,
-                    'specificity_score': spec_score
-                }
+            entry = {
+                'place_id': branch['id'],
+                'place_name': branch.get('name', m_name),
+                'title': title,
+                'event_date': clean_date_str,
+                'snippet': snippet,
+                'price_text': ev.get('price_text', 'Check website'),
+                'category_name': master.get('category', 'Special Activity'),
+                'zip_code': branch.get('zip_code'),
+                'window_type': window_label,
+                'specificity_score': random.randint(8, 10) if "exhibit" in title.lower() else random.randint(5, 7)
+            }
 
-                try:
-                    supabase.table("events").insert(entry).execute()
-                except Exception as e:
-                    print(f"      ❌ DB ERROR for '{title}': {e}")
+            try:
+                supabase.table("events").insert(entry).execute()
+            except Exception as e:
+                print(f"      ❌ DB ERROR: {e}")
 
     # Final Timestamp Update
     supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
@@ -283,72 +289,52 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
+    # Calculate Date Boundaries
+    today = datetime.now()
+    ninety_days_later = today + timedelta(days=90)
+    
+    today_str = today.strftime('%Y-%m-%d')
+    limit_str = ninety_days_later.strftime('%Y-%m-%d')
+    
     try:
-        print(f"📡 Scoping: {master['name']} (ID: {master['id']})")
+        print(f"📡 Scoping: {master['name']} (Window: {today_str} to {limit_str})")
         
-        # 🛡️ STEALTH: Use Desktop Headers and Google Referer
         page.set_extra_http_headers({
             "Referer": "https://www.google.com/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36..."
         })
 
-        # Navigate
-        response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        
-        # Handle Blocks
-        if response.status in [403, 405]:
-            print(f"   ⚠️ Blocked ({response.status}). Retrying with human delay...")
-            time.sleep(random.randint(5, 10))
-            page.goto(url, wait_until="domcontentloaded")
+        page.goto(url, wait_until="networkidle", timeout=60000)
 
-        # 🎯 GENERAL DYNAMIC WAIT: Wait for common event container patterns
-        selectors = [".event", ".calendar", ".card", ".item", ".featured", "article", ".grid", "section"]
-        try:
-            page.wait_for_selector(", ".join(selectors), timeout=12000)
-        except:
-            print(f"      ⏳ Timeout waiting for specific elements, scanning full page.")
+        # 🖱️ AGGRESSIVE LOADING: Scroll-Wait-Scroll loop for IDs 2 & 3
+        for _ in range(4):
+            page.mouse.wheel(0, 600)
+            time.sleep(1.5)
 
-        # Human-like interaction to trigger lazy-loading
-        page.mouse.wheel(0, 1000)
-        time.sleep(3)
-        page.mouse.wheel(0, -500)
-
-        # Extraction Logic
         raw_data = page.evaluate("""() => {
-            let text = "TITLE: " + document.title + "\\n";
-            text += "BODY: " + document.body.innerText + "\\n";
-            document.querySelectorAll('img').forEach(img => {
-                if(img.alt && img.alt.length > 10) text += " | ImageAttr: " + img.alt;
-            });
-            return text;
+            return document.body.innerText + " " + 
+                   Array.from(document.querySelectorAll('img')).map(i => i.alt).join(" ");
         }""")
 
-        # Determine Dynamic Window Label
-        today = datetime.now()
-        if today.day == 1: window_label = "Special Scout"
-        elif today.weekday() == 0: window_label = "Weekly Deep Dive"
-        else: window_label = "Daily Refresh"
-
-        # 🧠 AI PROMPT: Focused on quality and descriptive snippets
+        # 🧠 REFINED PROMPT: Strict 90-Day Future Window
         prompt = f"""
-        Analyze the text for {master['name']}. 
-        Goal: Extract ONLY special exhibits, workshops, festivals, or featured family events.
+        Extract special exhibits/events for {master['name']}.
         
-        RULES:
-        1. IGNORE "Open Daily" or "General Admission" hours.
-        2. title: Name of the event.
-        3. snippet: A 1-2 sentence description. 
-           - DO NOT include the date or time in the snippet.
-           - If no description is found, write a short summary based on the title.
-        4. event_date: YYYY-MM-DD. (Use {today.strftime('%Y-%m-01')} for permanent featured exhibits).
+        CRITICAL DATE RULES:
+        1. ONLY extract events occurring between {today_str} and {limit_str}.
+        2. DO NOT return any events before {today_str} (No past events).
+        3. DO NOT return any events after {limit_str} (Strict 90-day limit).
+        4. For ongoing/permanent exhibits, use the date: {today_str}.
+        
+        CONTENT RULES:
+        - IGNORE daily museum hours/admission text.
+        - Snippet MUST be a descriptive sentence (no dates/times in snippet).
         
         JSON format: ["title", "event_date", "snippet", "price_text"]
         """
         
         events = generate_with_retry(prompt, raw_data, master['name'])
-        
-        # Always run save_events to ensure timestamp updates
-        save_events(events or [], target_branches, midnight, master, mode, window_label)
+        save_events(events or [], target_branches, midnight, master, mode)
         
     except Exception as e:
         print(f"   ❌ Scrape Logic Crash for {master['name']}: {e}")
