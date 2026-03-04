@@ -84,25 +84,89 @@ def clean_html(raw_html):
 
 #def is_valid_date(date_str):
 #    return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
+from datetime import datetime
+import random
+from dateutil import parser
 
-from dateutil import parser # Ensure 'python-dateutil' is in your requirements.txt
 def is_valid_date(date_str):
-    """
-    Attempts to normalize any date string into YYYY-MM-DD.
-    Returns the string if valid, or None if it's junk.
-    """
+    """Normalizes any date string into YYYY-MM-DD."""
     if not date_str or not isinstance(date_str, str):
         return None
-    
     try:
-        # This handles "March 15 2026", "2026/03/15", "03-15-2026", etc.
         parsed_date = parser.parse(date_str)
-        # Ensure it's not in the past
-        if parsed_date.year < 2024: 
-            return None
+        if parsed_date.year < 2024: return None
         return parsed_date.strftime('%Y-%m-%d')
     except (ValueError, TypeError):
         return None
+
+# --- Business Logic & Saving ---
+def save_events(events, target_branches, midnight, master, mode):
+    if not events:
+        print(f"   ⚠️ No events found to save for {master.get('name')}")
+        try:
+            supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
+        except: pass
+        return
+
+    official_cat = master.get('category', 'Special Activity')
+    m_id = master['id']
+    m_name = master.get('name', 'Unknown Place')
+
+    print(f"   💾 Attempting to save {len(events)} events for {m_name}...")
+
+    # 1. CLEANUP: Remove old records to prevent duplicates
+    try:
+        supabase.table("events").delete().eq("place_id", m_id).gte("event_date", midnight).execute()
+    except Exception as e:
+        print(f"   ❌ Cleanup failed: {e}")
+
+    for ev in events:
+        # 2. DATE NORMALIZATION
+        clean_date = is_valid_date(ev.get('event_date'))
+        if not clean_date:
+            # Fallback for permanent museum exhibits
+            clean_date = datetime.now().strftime('%Y-%m-01') 
+            print(f"      ℹ️ Defaulted date for '{ev.get('title')}' to {clean_date}")
+
+        for branch in target_branches:
+            # 3. THE MUSEUM BYPASS (Trust the source for single-branch places)
+            is_single_place = (len(target_branches) == 1)
+            
+            should_add = False
+            if is_single_place or mode != "mapping":
+                should_add = True
+            else:
+                loc_hint = str(ev.get('found_location', '')).lower()
+                b_name = branch['name'].lower().replace("library", "").strip()
+                if b_name in loc_hint or b_name in ev['title'].lower():
+                    should_add = True
+
+            if should_add:
+                # 4. PREPARE ENTRY (No is_featured column)
+                entry = {
+                    'place_id': branch['id'],
+                    'title': ev.get('title'),
+                    'event_date': clean_date,
+                    'snippet': ev.get('snippet', ''),
+                    'price_text': ev.get('price_text', 'Check website'),
+                    'category_name': official_cat,
+                    'zip_code': branch.get('zip_code')
+                }
+
+                # 5. INSERT
+                try:
+                    res = supabase.table("events").insert(entry).execute()
+                    if res.data:
+                        print(f"      ✅ SUCCESS: Saved '{entry['title']}'")
+                except Exception as e:
+                    print(f"      ❌ DB INSERT ERROR: {e}")
+
+    # 6. UPDATE PLACE TIMESTAMP
+    try:
+        supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
+        print(f"   🕒 Place {m_id} timestamp updated.")
+    except Exception as e:
+        print(f"   ❌ Failed to update place timestamp: {e}")
         
 def generate_with_retry(prompt, text_content, context_name="General"):
     """Centralized AI call logic with linear backoff (12s/24s/36s)."""
@@ -154,85 +218,7 @@ def get_daily_batch(limit=24):
         .limit(limit)\
         .execute()
     return res.data
-     
-# --- Business Logic & Saving ---
-def save_events(events, target_branches, midnight, master, mode):
-    """
-    Saves events to Supabase with a bypass for single-branch places (Museums).
-    """
-    if not events:
-        print(f"   ⚠️ No events list provided to save_events for {master.get('name')}")
-        # Even if empty, we update the timestamp to show we checked it
-        try:
-            supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
-        except: pass
-        return
-
-    official_cat = master.get('category', 'Special Activity')
-    m_id = master['id']
-    m_name = master.get('name', 'Unknown Place')
-
-    print(f"   💾 Attempting to save {len(events)} events for {m_name}...")
-
-    # 1. CLEANUP: Delete old events for this place from today onwards
-    try:
-        supabase.table("events").delete().eq("place_id", m_id).gte("event_date", midnight).execute()
-    except Exception as e:
-        print(f"   ❌ Cleanup failed: {e}")
-
-    for ev in events:
-        # 2. DATE NORMALIZATION
-        # We use our new 'forgiving' date checker
-        clean_date = is_valid_date(ev.get('event_date'))
-        if not clean_date:
-            print(f"      ⏩ Skipping '{ev.get('title')}' due to invalid date: {ev.get('event_date')}")
-            continue
-
-        for branch in target_branches:
-            # 3. THE MUSEUM BYPASS
-            # If we only have 1 branch, we DON'T check if the name matches. 
-            # We trust that the scraper found it on the museum's own site.
-            is_single_place = (len(target_branches) == 1)
-            
-            should_add = False
-            if is_single_place or mode != "mapping":
-                should_add = True
-            else:
-                # This part is for Libraries/Parks with many branches
-                loc_hint = str(ev.get('found_location', '')).lower()
-                b_name = branch['name'].lower().replace("library", "").strip()
-                if b_name in loc_hint or b_name in ev['title'].lower():
-                    should_add = True
-
-            if should_add:
-                # 4. PREPARE ENTRY
-                entry = {
-                    'place_id': branch['id'],
-                    'title': ev.get('title'),
-                    'event_date': clean_date,
-                    'snippet': ev.get('snippet', ''),
-                    'price_text': ev.get('price_text', 'Check website'),
-                    'category_name': official_cat,
-                    'zip_code': branch.get('zip_code'),
-                    'is_featured': True
-                }
-
-                # 5. INSERT WITH TRACE
-                try:
-                    res = supabase.table("events").insert(entry).execute()
-                    if res.data:
-                        print(f"      ✅ SUCCESS: Saved '{entry['title']}' for {clean_date}")
-                except Exception as e:
-                    print(f"      ❌ DB INSERT ERROR for '{entry['title']}': {e}")
-
-    # 6. UPDATE PLACE TIMESTAMP
-    try:
-        now_str = datetime.now().isoformat()
-        supabase.table("places").update({"last_scraped_at": now_str}).eq("id", m_id).execute()
-        print(f"   🕒 Place {m_id} timestamp updated.")
-    except Exception as e:
-        print(f"   ❌ Failed to update place timestamp: {e}")
-        
+       
 # --- Scraper Pathway ---
 # this function works for the category of workshop, but not others
 #def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
