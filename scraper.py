@@ -100,8 +100,9 @@ def is_valid_date(date_str):
         return None
 
 # --- Business Logic & Saving ---
-def save_events(events, target_branches, midnight, master, mode):
+def save_events(events, target_branches, midnight, master, mode, window_label):
     if not events:
+        print(f"   ⚠️ No events found for {master.get('name')}. Updating timestamp.")
         try:
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
         except: pass
@@ -109,49 +110,52 @@ def save_events(events, target_branches, midnight, master, mode):
 
     m_id = master['id']
     m_name = master.get('name', 'Unknown Place')
-    official_cat = master.get('category', 'Special Activity')
+    official_cat = master.get('category', 'Activity')
 
-    # Determine window_type based on your logic
-    # You can pass this 'window_val' into the function or calculate it here
-    # 1: Daily, 2: Weekly, 3: Special (Defaulting to 3 for our current targeted test)
-    window_val = 3 
+    print(f"   💾 Saving {len(events)} events for {m_name} as '{window_label}'...")
 
-    print(f"   💾 Saving {len(events)} events for {m_name}...")
-
-    # Cleanup existing
-    supabase.table("events").delete().eq("place_id", m_id).gte("event_date", midnight).execute()
+    # Cleanup existing for this window
+    supabase.table("events").delete().eq("place_id", m_id).eq("window_type", window_label).gte("event_date", midnight).execute()
 
     for ev in events:
         clean_date = is_valid_date(ev.get('event_date'))
         if not clean_date: continue
 
-        # Calculate Specificity Score (1-10) 
-        # Higher score for events that aren't "Daily" or "Permanent"
-        title_low = ev.get('title', '').lower()
-        is_common = any(word in title_low for word in ["daily", "open", "hours", "permanent"])
-        spec_score = random.randint(3, 5) if is_common else random.randint(8, 10)
+        # --- SNIPPET CLEANUP ---
+        title = ev.get('title', 'Special Event')
+        snippet = ev.get('snippet', '').strip()
+        # If snippet is just digits/dates or too short, replace with helpful text
+        is_bad_snippet = (len(snippet) < 20) or any(char.isdigit() for char in snippet[:10])
+        if is_bad_snippet or snippet == clean_date:
+            snippet = f"Featured program: {title} at {m_name}."
+
+        # --- SPECIFICITY SCORE ---
+        title_low = title.lower()
+        special_keywords = ["exhibit", "festival", "annual", "special", "workshop", "opening"]
+        is_special = any(kw in title_low for kw in special_keywords)
+        spec_score = random.randint(8, 10) if is_special else random.randint(4, 6)
 
         for branch in target_branches:
             if len(target_branches) == 1 or mode != "mapping":
                 entry = {
                     'place_id': branch['id'],
-                    'place_name': branch.get('name', m_name), # Fix: Added place_name
-                    'title': ev.get('title'),
+                    'place_name': branch.get('name', m_name),
+                    'title': title,
                     'event_date': clean_date,
-                    'snippet': ev.get('snippet', ''),
+                    'snippet': snippet,
                     'price_text': ev.get('price_text', 'Check website'),
                     'category_name': official_cat,
                     'zip_code': branch.get('zip_code'),
-                    'window_type': window_val,      # Fix: Added window_type
-                    'specificity_score': spec_score # Fix: Added specificity_score
+                    'window_type': window_label,
+                    'specificity_score': spec_score
                 }
 
                 try:
                     supabase.table("events").insert(entry).execute()
                 except Exception as e:
-                    print(f"      ❌ DB Error: {e}")
+                    print(f"      ❌ DB ERROR for '{title}': {e}")
 
-    # Update timestamp
+    # Final Timestamp Update
     supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
 
 def generate_with_retry(prompt, text_content, context_name="General"):
@@ -275,87 +279,82 @@ def get_daily_batch(limit=24):
 #    finally:
 #        page.close()
 
-import time
-import random
-from datetime import datetime
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
-    """
-    Advanced Scraper: Uses Google-referral stealth, dynamic scrolling, 
-    and strict AI filtering to find 'Special' events only.
-    """
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
     try:
-        print(f"📡 Scoping ID {master['id']}: {master['name']}")
+        print(f"📡 Scoping: {master['name']} (ID: {master['id']})")
         
-        # 🛡️ STEALTH: Pretend we are a human coming from a Google Search
+        # 🛡️ STEALTH: Use Desktop Headers and Google Referer
         page.set_extra_http_headers({
             "Referer": "https://www.google.com/",
-            "Accept-Language": "en-US,en;q=0.9"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         })
 
-        # Navigate and wait for the 'Featured' cards to load via JS
-        response = page.goto(url, wait_until="networkidle", timeout=60000)
+        # Navigate
+        response = page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        # Handle Bot Blocks (405/403)
+        # Handle Blocks
         if response.status in [403, 405]:
-            print(f"   ⚠️ Site blocked access ({response.status}). Attempting human-delay retry...")
+            print(f"   ⚠️ Blocked ({response.status}). Retrying with human delay...")
             time.sleep(random.randint(5, 10))
             page.goto(url, wait_until="domcontentloaded")
 
-        # 🖱️ HUMAN BEHAVIOR: Trigger lazy-loading for dynamic museum galleries
-        page.mouse.wheel(0, 800)
-        time.sleep(2)
-        page.mouse.wheel(0, 800)
-        time.sleep(2)
+        # 🎯 GENERAL DYNAMIC WAIT: Wait for common event container patterns
+        selectors = [".event", ".calendar", ".card", ".item", ".featured", "article", ".grid", "section"]
+        try:
+            page.wait_for_selector(", ".join(selectors), timeout=12000)
+        except:
+            print(f"      ⏳ Timeout waiting for specific elements, scanning full page.")
 
-        # 🧩 EXTRACTION: Capture visible text + SEO Meta + Image Alts
-        # This catches titles hidden in 'Hover' galleries or Shadow DOMs
+        # Human-like interaction to trigger lazy-loading
+        page.mouse.wheel(0, 1000)
+        time.sleep(3)
+        page.mouse.wheel(0, -500)
+
+        # Extraction Logic
         raw_data = page.evaluate("""() => {
             let text = "TITLE: " + document.title + "\\n";
-            text += "META: " + Array.from(document.querySelectorAll('meta[name="description"]')).map(m => m.content).join(" ") + "\\n";
             text += "BODY: " + document.body.innerText + "\\n";
-            // Add image descriptions which museums often use for 'Featured' titles
             document.querySelectorAll('img').forEach(img => {
-                if(img.alt && img.alt.length > 5) text += " | ImageAttr: " + img.alt;
+                if(img.alt && img.alt.length > 10) text += " | ImageAttr: " + img.alt;
             });
             return text;
         }""")
 
-        # 🧠 AI PROMPT: Filtering for "Special" vs "Regular"
+        # Determine Dynamic Window Label
         today = datetime.now()
-        prompt = f"""
-        Analyze the museum text for {master['name']}. 
-        Today's date is {today.strftime('%Y-%m-%d')}.
+        if today.day == 1: window_label = "Special Scout"
+        elif today.weekday() == 0: window_label = "Weekly Deep Dive"
+        else: window_label = "Daily Refresh"
 
-        GOAL: Extract ONLY special exhibits, workshops, seasonal festivals, or one-time events.
+        # 🧠 AI PROMPT: Focused on quality and descriptive snippets
+        prompt = f"""
+        Analyze the text for {master['name']}. 
+        Goal: Extract ONLY special exhibits, workshops, festivals, or featured family events.
         
-        STRICT FILTERING RULES:
-        1. IGNORE "Open Daily," "Museum Hours," or "General Admission" entries.
-        2. IGNORE regular cafe or gift shop hours.
-        3. EXTRACT special exhibits (e.g., "Venom," "Shark Life"), holiday events, or workshops.
-        4. DATE RANGE: March 2026 to June 2026.
-        5. If it's a special exhibit with no end date, use "{today.strftime('%Y-%m-01')}" as the date.
+        RULES:
+        1. IGNORE "Open Daily" or "General Admission" hours.
+        2. title: Name of the event.
+        3. snippet: A 1-2 sentence description. 
+           - DO NOT include the date or time in the snippet.
+           - If no description is found, write a short summary based on the title.
+        4. event_date: YYYY-MM-DD. (Use {today.strftime('%Y-%m-01')} for permanent featured exhibits).
         
-        RETURN ONLY A JSON LIST OF OBJECTS: 
-        [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "..."}}]
+        JSON format: ["title", "event_date", "snippet", "price_text"]
         """
         
         events = generate_with_retry(prompt, raw_data, master['name'])
         
-        # We always call save_events (even if events is empty) to update the last_scraped_at timestamp
-        save_events(events or [], target_branches, midnight, master, mode)
+        # Always run save_events to ensure timestamp updates
+        save_events(events or [], target_branches, midnight, master, mode, window_label)
         
     except Exception as e:
-        print(f"   ❌ Scrape Logic Crash for ID {master['id']}: {e}")
-        # Final safety to ensure the script doesn't hang
-        try:
-            save_events([], target_branches, midnight, master, mode)
-        except: pass
+        print(f"   ❌ Scrape Logic Crash for {master['name']}: {e}")
     finally:
         page.close()
-               
+
 def run_gemini_discovery(midnight):
     today = datetime.now()
     future_date = today + timedelta(days=90)
