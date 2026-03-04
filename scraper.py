@@ -102,72 +102,58 @@ def is_valid_date(date_str):
 # --- Business Logic & Saving ---
 def save_events(events, target_branches, midnight, master, mode):
     if not events:
-        print(f"   ⚠️ No events found to save for {master.get('name')}")
         try:
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
         except: pass
         return
 
-    official_cat = master.get('category', 'Special Activity')
     m_id = master['id']
     m_name = master.get('name', 'Unknown Place')
+    official_cat = master.get('category', 'Special Activity')
 
-    print(f"   💾 Attempting to save {len(events)} events for {m_name}...")
+    # Determine window_type based on your logic
+    # You can pass this 'window_val' into the function or calculate it here
+    # 1: Daily, 2: Weekly, 3: Special (Defaulting to 3 for our current targeted test)
+    window_val = 3 
 
-    # 1. CLEANUP: Remove old records to prevent duplicates
-    try:
-        supabase.table("events").delete().eq("place_id", m_id).gte("event_date", midnight).execute()
-    except Exception as e:
-        print(f"   ❌ Cleanup failed: {e}")
+    print(f"   💾 Saving {len(events)} events for {m_name}...")
+
+    # Cleanup existing
+    supabase.table("events").delete().eq("place_id", m_id).gte("event_date", midnight).execute()
 
     for ev in events:
-        # 2. DATE NORMALIZATION
         clean_date = is_valid_date(ev.get('event_date'))
-        if not clean_date:
-            # Fallback for permanent museum exhibits
-            clean_date = datetime.now().strftime('%Y-%m-01') 
-            print(f"      ℹ️ Defaulted date for '{ev.get('title')}' to {clean_date}")
+        if not clean_date: continue
+
+        # Calculate Specificity Score (1-10) 
+        # Higher score for events that aren't "Daily" or "Permanent"
+        title_low = ev.get('title', '').lower()
+        is_common = any(word in title_low for word in ["daily", "open", "hours", "permanent"])
+        spec_score = random.randint(3, 5) if is_common else random.randint(8, 10)
 
         for branch in target_branches:
-            # 3. THE MUSEUM BYPASS (Trust the source for single-branch places)
-            is_single_place = (len(target_branches) == 1)
-            
-            should_add = False
-            if is_single_place or mode != "mapping":
-                should_add = True
-            else:
-                loc_hint = str(ev.get('found_location', '')).lower()
-                b_name = branch['name'].lower().replace("library", "").strip()
-                if b_name in loc_hint or b_name in ev['title'].lower():
-                    should_add = True
-
-            if should_add:
-                # 4. PREPARE ENTRY (No is_featured column)
+            if len(target_branches) == 1 or mode != "mapping":
                 entry = {
                     'place_id': branch['id'],
+                    'place_name': branch.get('name', m_name), # Fix: Added place_name
                     'title': ev.get('title'),
                     'event_date': clean_date,
                     'snippet': ev.get('snippet', ''),
                     'price_text': ev.get('price_text', 'Check website'),
                     'category_name': official_cat,
-                    'zip_code': branch.get('zip_code')
+                    'zip_code': branch.get('zip_code'),
+                    'window_type': window_val,      # Fix: Added window_type
+                    'specificity_score': spec_score # Fix: Added specificity_score
                 }
 
-                # 5. INSERT
                 try:
-                    res = supabase.table("events").insert(entry).execute()
-                    if res.data:
-                        print(f"      ✅ SUCCESS: Saved '{entry['title']}'")
+                    supabase.table("events").insert(entry).execute()
                 except Exception as e:
-                    print(f"      ❌ DB INSERT ERROR: {e}")
+                    print(f"      ❌ DB Error: {e}")
 
-    # 6. UPDATE PLACE TIMESTAMP
-    try:
-        supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
-        print(f"   🕒 Place {m_id} timestamp updated.")
-    except Exception as e:
-        print(f"   ❌ Failed to update place timestamp: {e}")
-        
+    # Update timestamp
+    supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
+
 def generate_with_retry(prompt, text_content, context_name="General"):
     """Centralized AI call logic with linear backoff (12s/24s/36s)."""
     for attempt in range(3):
@@ -289,59 +275,87 @@ def get_daily_batch(limit=24):
 #    finally:
 #        page.close()
 
+import time
+import random
+from datetime import datetime
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
+    """
+    Advanced Scraper: Uses Google-referral stealth, dynamic scrolling, 
+    and strict AI filtering to find 'Special' events only.
+    """
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
     try:
         print(f"📡 Scoping ID {master['id']}: {master['name']}")
         
-        # 🛡️ STEALTH: Pretend we are coming from Google
-        # This is the "Magic Fix" for 405 Errors
+        # 🛡️ STEALTH: Pretend we are a human coming from a Google Search
         page.set_extra_http_headers({
             "Referer": "https://www.google.com/",
             "Accept-Language": "en-US,en;q=0.9"
         })
 
-        # Navigate with a longer timeout for heavy museum sites
+        # Navigate and wait for the 'Featured' cards to load via JS
         response = page.goto(url, wait_until="networkidle", timeout=60000)
         
-        if response.status == 405 or response.status == 403:
-            print(f"   ⚠️ Site blocked direct access ({response.status}). Trying deeper stealth...")
-            # If blocked, we try one more time with a random human delay
+        # Handle Bot Blocks (405/403)
+        if response.status in [403, 405]:
+            print(f"   ⚠️ Site blocked access ({response.status}). Attempting human-delay retry...")
             time.sleep(random.randint(5, 10))
             page.goto(url, wait_until="domcontentloaded")
 
-        # 🖱️ Aggressive trigger for Palo Alto / CalAcademy dynamic cards
-        page.mouse.wheel(0, 1500)
-        time.sleep(4) 
-        
-        # Capture VISIBLE text + ALT text from images (where museum titles hide)
+        # 🖱️ HUMAN BEHAVIOR: Trigger lazy-loading for dynamic museum galleries
+        page.mouse.wheel(0, 800)
+        time.sleep(2)
+        page.mouse.wheel(0, 800)
+        time.sleep(2)
+
+        # 🧩 EXTRACTION: Capture visible text + SEO Meta + Image Alts
+        # This catches titles hidden in 'Hover' galleries or Shadow DOMs
         raw_data = page.evaluate("""() => {
-            let text = document.body.innerText;
-            // Add image alts which often contain event names in galleries
+            let text = "TITLE: " + document.title + "\\n";
+            text += "META: " + Array.from(document.querySelectorAll('meta[name="description"]')).map(m => m.content).join(" ") + "\\n";
+            text += "BODY: " + document.body.innerText + "\\n";
+            // Add image descriptions which museums often use for 'Featured' titles
             document.querySelectorAll('img').forEach(img => {
-                if(img.alt) text += " | Image: " + img.alt;
+                if(img.alt && img.alt.length > 5) text += " | ImageAttr: " + img.alt;
             });
             return text;
         }""")
 
+        # 🧠 AI PROMPT: Filtering for "Special" vs "Regular"
         today = datetime.now()
         prompt = f"""
-        Find all events and exhibits for {master['name']} in the text.
-        Date Range: March 2026 to June 2026.
-        If it is a permanent exhibit with no date, use "{today.strftime('%Y-%m-01')}".
-        Format as JSON list: ["title", "event_date", "snippet", "price_text"].
+        Analyze the museum text for {master['name']}. 
+        Today's date is {today.strftime('%Y-%m-%d')}.
+
+        GOAL: Extract ONLY special exhibits, workshops, seasonal festivals, or one-time events.
+        
+        STRICT FILTERING RULES:
+        1. IGNORE "Open Daily," "Museum Hours," or "General Admission" entries.
+        2. IGNORE regular cafe or gift shop hours.
+        3. EXTRACT special exhibits (e.g., "Venom," "Shark Life"), holiday events, or workshops.
+        4. DATE RANGE: March 2026 to June 2026.
+        5. If it's a special exhibit with no end date, use "{today.strftime('%Y-%m-01')}" as the date.
+        
+        RETURN ONLY A JSON LIST OF OBJECTS: 
+        [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "..."}}]
         """
         
         events = generate_with_retry(prompt, raw_data, master['name'])
+        
+        # We always call save_events (even if events is empty) to update the last_scraped_at timestamp
         save_events(events or [], target_branches, midnight, master, mode)
         
     except Exception as e:
         print(f"   ❌ Scrape Logic Crash for ID {master['id']}: {e}")
+        # Final safety to ensure the script doesn't hang
+        try:
+            save_events([], target_branches, midnight, master, mode)
+        except: pass
     finally:
         page.close()
-        
+               
 def run_gemini_discovery(midnight):
     today = datetime.now()
     future_date = today + timedelta(days=90)
