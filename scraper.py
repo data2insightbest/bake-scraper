@@ -296,47 +296,49 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
     try:
         print(f"📡 Scoping ID {master['id']}: {master['name']}")
         
-        # Navigate and wait for content
-        response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        # 🛡️ STEALTH: Pretend we are coming from Google
+        # This is the "Magic Fix" for 405 Errors
+        page.set_extra_http_headers({
+            "Referer": "https://www.google.com/",
+            "Accept-Language": "en-US,en;q=0.9"
+        })
+
+        # Navigate with a longer timeout for heavy museum sites
+        response = page.goto(url, wait_until="networkidle", timeout=60000)
         
-        if response.status >= 400:
-            print(f"   ⚠️ Site returned error status {response.status}. Skipping.")
-            return
+        if response.status == 405 or response.status == 403:
+            print(f"   ⚠️ Site blocked direct access ({response.status}). Trying deeper stealth...")
+            # If blocked, we try one more time with a random human delay
+            time.sleep(random.randint(5, 10))
+            page.goto(url, wait_until="domcontentloaded")
 
-        # Mimic human pause
-        time.sleep(3)
-        page.mouse.wheel(0, 1000)
-        time.sleep(2)
-
-        # Get the most reliable data source: InnerText + Meta Tags
+        # 🖱️ Aggressive trigger for Palo Alto / CalAcademy dynamic cards
+        page.mouse.wheel(0, 1500)
+        time.sleep(4) 
+        
+        # Capture VISIBLE text + ALT text from images (where museum titles hide)
         raw_data = page.evaluate("""() => {
-            return document.title + "\\n" + 
-                   document.body.innerText + "\\n" + 
-                   Array.from(document.querySelectorAll('meta[name="description"]')).map(m => m.content).join(" ");
+            let text = document.body.innerText;
+            // Add image alts which often contain event names in galleries
+            document.querySelectorAll('img').forEach(img => {
+                if(img.alt) text += " | Image: " + img.alt;
+            });
+            return text;
         }""")
-
-        if len(raw_data) < 500:
-            print(f"   ⚠️ Data too short ({len(raw_data)} chars). Site likely blocked us.")
-            # We still update the timestamp so we don't get stuck in a loop
-            save_events([], target_branches, midnight, master, mode)
-            return
 
         today = datetime.now()
         prompt = f"""
-        Find all events/exhibits for {master['name']} in the text.
-        Window: March 2026 to June 2026.
-        If dates aren't clear, but it's a 'Featured Exhibit', assume it is active now.
-        JSON format: ["title", "event_date" (YYYY-MM-DD), "snippet", "price_text"].
+        Find all events and exhibits for {master['name']} in the text.
+        Date Range: March 2026 to June 2026.
+        If it is a permanent exhibit with no date, use "{today.strftime('%Y-%m-01')}".
+        Format as JSON list: ["title", "event_date", "snippet", "price_text"].
         """
         
         events = generate_with_retry(prompt, raw_data, master['name'])
-        
-        # This will now ALWAYS call save_events, even if events is empty,
-        # ensuring the 'last_scraped_at' timestamp gets updated.
         save_events(events or [], target_branches, midnight, master, mode)
         
     except Exception as e:
-        print(f"   ❌ Error in scrape logic for ID {master['id']}: {e}")
+        print(f"   ❌ Scrape Logic Crash for ID {master['id']}: {e}")
     finally:
         page.close()
         
