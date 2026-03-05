@@ -118,18 +118,18 @@ def save_events(events, target_branches, midnight, master, mode):
     m_name = master.get('name', 'Unknown')
     today = datetime.now().date()
     
-    # ALWAYS Update last_scraped_at
+    # Always update last_scraped_at
     try:
         supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
     except: pass
 
     if not events: return
 
-    # Clear future records
+    # Cleanup future entries
     supabase.table("events").delete().eq("place_id", m_id).gte("event_date", today.isoformat()).execute()
 
     for ev in events:
-        # Type Safety (AI sometimes returns lists or dicts)
+        # Normalize AI output format
         if isinstance(ev, list):
             title, r_date, snippet = ev[0], ev[1], ev[2]
         else:
@@ -143,7 +143,7 @@ def save_events(events, target_branches, midnight, master, mode):
         ev_dt = datetime.strptime(date_str, '%Y-%m-%d').date()
         days_away = (ev_dt - today).days
         
-        # --- YOUR 3 CATEGORIES (STRICT DATE LOGIC) ---
+        # --- STRICT 3-CATEGORY WINDOWING ---
         if days_away <= 14:
             window = "Daily Refresh"
         elif days_away <= 45:
@@ -151,11 +151,12 @@ def save_events(events, target_branches, midnight, master, mode):
         elif days_away <= 90:
             window = "Special Scout"
         else:
-            continue # Ignore anything beyond 90 days
+            continue # Skip events outside 90 days
 
-        # --- JUNK FILTER ---
-        title_low = title.lower()
-        if any(j in title_low for j in ["incoming", "hours", "close", "schedule", "admission"]):
+        # --- UNIVERSAL JUNK FILTER ---
+        title_low = title.lower().strip()
+        junk_list = ["incoming", "hours", "closed", "private", "schedule", "admission"]
+        if any(j == title_low or j in title_low for j in junk_list):
             continue
 
         for branch in target_branches:
@@ -164,7 +165,7 @@ def save_events(events, target_branches, midnight, master, mode):
                 'place_name': branch.get('name', m_name),
                 'title': title,
                 'event_date': date_str,
-                'snippet': snippet if len(snippet) > 15 else f"Special event at {m_name}.",
+                'snippet': snippet if len(snippet) > 20 else f"Featured program at {m_name}.",
                 'category_name': master.get('category', 'Special Activity'),
                 'zip_code': branch.get('zip_code'),
                 'window_type': window,
@@ -172,7 +173,8 @@ def save_events(events, target_branches, midnight, master, mode):
             }
             try:
                 supabase.table("events").insert(entry).execute()
-            except: pass
+            except Exception as e:
+                print(f"      ❌ DB Insert Fail: {e}")
 
 def generate_with_retry(prompt, text_content, context_name="General"):
     """Centralized AI call logic with linear backoff (12s/24s/36s)."""
@@ -295,51 +297,57 @@ def get_daily_batch(limit=24):
 #    finally:
 #        page.close()
 
+import random
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     today_str = datetime.now().strftime('%Y-%m-%d')
     
     try:
-        print(f"📡 Scoping: {master['name']} (ID: {master['id']})")
+        print(f"📡 Scoping: {master['name']} (General Mode)")
         
-        # Increased timeout to 90s and faster wait state
-        page.goto(url, wait_until="domcontentloaded", timeout=90000)
-        
-        # Incremental scrolling to trigger JavaScript loaders
-        for _ in range(5): 
-            page.mouse.wheel(0, 800)
-            time.sleep(2)
+        # 🛡️ Universal Stealth: Random delay + Human-like headers
+        time.sleep(random.uniform(1, 3))
+        page.set_extra_http_headers({
+            "Referer": "https://www.google.com/",
+            "Accept-Language": "en-US,en;q=0.9"
+        })
 
-        # Specifically for ID 2/3/4: wait for any content to appear
-        try:
-            page.wait_for_selector("body", timeout=10000)
-        except: pass
+        # Navigate using domcontentloaded (fastest reliable state)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
+        # 🖱️ UNIVERSAL TRIGGER: Scroll in steps for EVERY site.
+        # This fixes lazy-loading for any future place you add.
+        for _ in range(5):
+            page.mouse.wheel(0, 600)
+            time.sleep(1.2) # Wait for images/cards to pop in
+
+        # 🔍 CONTENT TARGETING: Find the main area to ignore header/footer junk
         content_area = page.evaluate("""() => {
-            // Grab the main content area to avoid footer junk
-            const main = document.querySelector('main, article, #content, .calendar, .events-grid');
+            // Priority list of common main-content tags
+            const main = document.querySelector('main, article, #content, [role="main"], .calendar, .events');
             return main ? main.innerText : document.body.innerText;
         }""")
 
+        # 🧠 THE CLEAN PROMPT: Logic stays consistent for all sites
         prompt = f"""
-        Find special events for {master['name']}. TODAY IS {today_str}.
+        Extract ONLY special exhibits or featured events for {master['name']}.
+        Today's date is {today_str}.
         
-        STRICT RULES:
-        1. Only extract specific named exhibits or workshops.
-        2. IGNORE: "Museum Hours", "Open Daily", "Closed", "Incoming", "Today's Schedule".
-        3. If a specific date like "March 20" is found, use it.
-        4. If it's a featured exhibit with NO date, use {today_str}.
+        STRICT FILTERS:
+        1. IGNORE generic "Museum Hours", "Open Daily", or "Tickets".
+        2. IGNORE one-word garbage like "Incoming" or "Schedule".
+        3. If an exhibit has no specific date but is 'Featured', use {today_str}.
+        4. If a date like 'March 25' is mentioned, use that year (2026).
         
-        JSON format: ["title", "event_date", "snippet", "price_text"]
+        RETURN JSON LIST OF OBJECTS: ["title", "event_date", "snippet", "price_text"]
         """
         
         events = generate_with_retry(prompt, content_area, master['name'])
         save_events(events or [], target_branches, midnight, master, mode)
             
     except Exception as e:
-        print(f"   ❌ Error Scoping ID {master['id']}: {e}")
-        # Ensure timestamp updates even on failure
+        print(f"   ❌ Error Scoping {master['name']}: {e}")
         try:
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
         except: pass
