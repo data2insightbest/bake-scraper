@@ -118,27 +118,28 @@ def save_events(events, target_branches, midnight, master, mode):
     m_name = master.get('name', 'Unknown')
     today = datetime.now().date()
     
-    # 1. Update last_scraped_at column NO MATTER WHAT
+    # ALWAYS Update timestamp immediately
     try:
         supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
     except: pass
 
     if not events:
-        print(f"   ⚠️ No events extracted for {m_name}")
         return
 
-    # 2. Cleanup old future data
-    supabase.table("events").delete().eq("place_id", m_id).gte("event_date", today.isoformat()).execute()
+    # Delete existing data for the 90-day future window to avoid duplicates
+    limit_date = today + timedelta(days=90)
+    supabase.table("events").delete().eq("place_id", m_id).gte("event_date", today.isoformat()).lte("event_date", limit_date.isoformat()).execute()
 
     for ev in events:
-        # Handle different return types from AI
+        # Normalize AI output (List vs Dict)
         if isinstance(ev, list):
             title, r_date, snippet = ev[0], ev[1], ev[2]
         else:
             title = ev.get('title', 'Special Event')
-            r_date = ev.get('event_date', today.isoformat())
+            r_date = ev.get('event_date', str(today))
             snippet = ev.get('snippet', '')
 
+        # Use our improved is_valid_date (no hard-coded 2024)
         date_str = is_valid_date(r_date)
         if not date_str: continue
         
@@ -155,11 +156,14 @@ def save_events(events, target_branches, midnight, master, mode):
         else:
             continue
 
-        # --- JUNK FILTER ---
-        title_low = title.lower().strip()
-        junk_list = ["incoming", "hours", "closed", "private", "schedule", "admission", "visit us"]
-        if any(j == title_low or j in title_low for j in junk_list) or len(title) < 3:
+        # --- JUNK & HALLUCINATION CLEANUP ---
+        title_low = title.lower()
+        if any(j in title_low for j in ["incoming", "hours", "schedule", "admission", "closed"]):
             continue
+            
+        # If Gemini quotes the prompt or returns a placeholder snippet
+        if "featured exhibit" in snippet.lower() or len(snippet) < 15:
+            snippet = f"Special program: {title} at {m_name}."
 
         for branch in target_branches:
             entry = {
@@ -167,7 +171,7 @@ def save_events(events, target_branches, midnight, master, mode):
                 'place_name': branch.get('name', m_name),
                 'title': title,
                 'event_date': date_str,
-                'snippet': snippet if len(snippet) > 20 else f"Special program at {m_name}.",
+                'snippet': snippet,
                 'category_name': master.get('category', 'Special Activity'),
                 'zip_code': branch.get('zip_code'),
                 'window_type': window,
@@ -176,7 +180,7 @@ def save_events(events, target_branches, midnight, master, mode):
             try:
                 supabase.table("events").insert(entry).execute()
             except: pass
-                
+
 def generate_with_retry(prompt, text_content, context_name="General"):
     """Centralized AI call logic with linear backoff (12s/24s/36s)."""
     for attempt in range(3):
@@ -302,54 +306,67 @@ import random
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
-    today_str = datetime.now().strftime('%Y-%m-%d')
+    
+    # --- DYNAMIC DATE CALCULATIONS ---
+    now = datetime.now()
+    today_str = now.strftime('%Y-%m-%d')
+    # Calculate 90 days from whatever today happens to be
+    ninety_days_out = (now + timedelta(days=90)).strftime('%Y-%m-%d')
     
     try:
-        print(f"📡 Scoping: {master['name']}...")
+        print(f"📡 Scoping: {master['name']} (Today: {today_str})")
         
-        # 1. Stealth Navigation
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # 🛡️ Universal Stealth Headers
+        page.set_extra_http_headers({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Referer": "https://www.google.com/"
+        })
 
-        # 2. The "Wake Up" Scroll
-        # We scroll specifically to trigger lazy-loading scripts
+        # Navigate - use 'load' state to ensure scripts run
+        page.goto(url, wait_until="load", timeout=60000)
+        time.sleep(2) 
+
+        # 🖱️ Human-like scroll to trigger lazy-loaded calendars (IDs 2, 3, 4)
         for _ in range(4):
-            page.mouse.wheel(0, 500)
-            time.sleep(random.uniform(1.0, 2.0)) # Jitter to look human
+            page.evaluate("window.scrollBy(0, 600)")
+            time.sleep(random.uniform(1.0, 1.8))
 
-        # 3. HTML Extraction (More powerful than innerText)
-        # We grab the HTML of the main content area. This catches text 
-        # that might be hidden in data-attributes or aria-labels.
-        raw_html = page.evaluate("""() => {
-            const main = document.querySelector('main, article, #content, .events, .calendar');
-            return main ? main.innerHTML : document.body.innerHTML;
+        # 🧩 Extraction: Capture text and ARIA labels (where dates often hide)
+        extracted_text = page.evaluate("""() => {
+            const root = document.querySelector('main') || document.body;
+            let data = root.innerText;
+            // Add aria-labels for accessibility-heavy sites like Exploratorium
+            root.querySelectorAll('[aria-label]').forEach(el => data += " " + el.getAttribute('aria-label'));
+            return data.replace(/\\s+/g, ' ').substring(0, 18000); 
         }""")
 
-        # 4. Limit the noise: If HTML is too massive, we strip tags but keep attributes
-        # This helps Gemini see the "hidden" event names in ID 2 and 3.
-        
+        # 🧠 THE DYNAMIC PROMPT: No hard-coded dates
         prompt = f"""
-        Analyze the following HTML/Text from {master['name']}.
-        Find special events/exhibits occurring between {today_str} and 90 days from now.
+        Find specific special events or exhibits at {master['name']}.
+        TODAY'S DATE: {today_str}.
         
-        STRICT QUALITY RULES:
-        - IGNORE: "Museum Hours", "Closed", "Private Party", "Tickets", "Incoming".
-        - IF NO SPECIFIC DATE: If it's a featured exhibit, use {today_str}.
-        - SNIPPET: Must be a clear description of the event.
+        STRICT RULES:
+        1. Only extract events between {today_str} and {ninety_days_out}.
+        2. Look for explicit dates (e.g., "March 25", "Saturday", "April").
+        3. If an exhibit is 'New' or 'Featured' but has no specific date, use {today_str}.
+        4. IGNORE: "Museum Hours", "Closed", "Incoming", "General Admission", "Daily".
+        5. SNIPPET: Must be a descriptive sentence about the event content.
         
-        RETURN JSON LIST: ["title", "event_date", "snippet", "price_text"]
+        FORMAT: Return a JSON LIST of objects:
+        [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "..."}}]
         """
         
-        events = generate_with_retry(prompt, raw_html[:20000], master['name'])
+        events = generate_with_retry(prompt, extracted_text, master['name'])
         save_events(events or [], target_branches, midnight, master, mode)
             
     except Exception as e:
-        print(f"   ❌ Error Scoping {master['name']}: {e}")
+        print(f"   ❌ Error Scoping ID {master['id']}: {e}")
+        # Ensure timestamp updates even on failure
         try:
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
         except: pass
     finally:
         page.close()
-
 
 def run_gemini_discovery(midnight):
     today = datetime.now()
