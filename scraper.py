@@ -84,70 +84,114 @@ def clean_html(raw_html):
 
 #def is_valid_date(date_str):
 #    return bool(re.match(r'^\d{4}-\d{2}-\d{2}$', str(date_str)))
+
 from datetime import datetime
 import random
 from dateutil import parser
-
 def is_valid_date(date_str):
-    """Normalizes any date string into YYYY-MM-DD."""
+    """
+    Normalizes date strings into YYYY-MM-DD.
+    Ensures date is between Today and 90 days in the future.
+    """
     if not date_str or not isinstance(date_str, str):
         return None
+    
+    today = datetime.now().date()
+    limit = today + timedelta(days=90)
+    
     try:
-        parsed_date = parser.parse(date_str)
-        if parsed_date.year < 2024: return None
-        return parsed_date.strftime('%Y-%m-%d')
-    except (ValueError, TypeError):
+        # fuzzy=True helps ignore "at 10:00 AM" or "Thursday" inside the string
+        parsed_date = parser.parse(date_str, fuzzy=True).date()
+        
+        # Validation: Must be today or in the next 90 days
+        if today <= parsed_date <= limit:
+            return parsed_date.strftime('%Y-%m-%d')
+        
+        # If it's a "Past" date from a static site, we ignore it
         return None
-
+    except (ValueError, TypeError, OverflowError):
+        return None
+        
 # --- Business Logic & Saving ---
 def save_events(events, target_branches, midnight, master, mode):
     m_id = master['id']
     m_name = master.get('name', 'Unknown Place')
     today = datetime.now().date()
     
-    # Update the timestamp immediately to ensure last_scrape is NEVER null
-    supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
+    # Update timestamp immediately to ensure last_scrape is NEVER null
+    try:
+        supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
+    except Exception as e:
+        print(f"   ⚠️ Failed to update timestamp for {m_name}: {e}")
 
     if not events:
-        print(f"   ⚠️ No valid special events found for {m_name}.")
+        print(f"   ⚠️ No events found for {m_name}.")
         return
 
-    print(f"   💾 Saving {len(events)} verified events for {m_name}...")
+    print(f"   💾 Processing {len(events)} potential events for {m_name}...")
 
     # Clear old future records for this place
     supabase.table("events").delete().eq("place_id", m_id).gte("event_date", today.isoformat()).execute()
 
     for ev in events:
-        date_str = is_valid_date(ev.get('event_date'))
+        # --- FIX: Handle List vs Dict (Type Safety) ---
+        if isinstance(ev, list):
+            # If AI returned [title, date, snippet, price]
+            title = ev[0] if len(ev) > 0 else "Special Event"
+            raw_date = ev[1] if len(ev) > 1 else today.isoformat()
+            snippet = ev[2] if len(ev) > 2 else ""
+            price = ev[3] if len(ev) > 3 else "See Website"
+        elif isinstance(ev, dict):
+            # If AI returned {"title": "...", "event_date": "..."}
+            title = ev.get('title', 'Special Event')
+            raw_date = ev.get('event_date', today.isoformat())
+            snippet = ev.get('snippet', '')
+            price = ev.get('price_text', 'See Website')
+        else:
+            continue
+
+        # --- DATE VALIDATION ---
+        date_str = is_valid_date(raw_date)
         if not date_str: continue
         
         ev_dt = datetime.strptime(date_str, '%Y-%m-%d').date()
         days_away = (ev_dt - today).days
 
-        # Strict Date/Window Logic
+        # Strict Date Guard (Today until +90 days)
         if days_away < 0 or days_away > 90: continue
         
+        # Determine Window Label
         if days_away <= 14: window = "Daily Refresh"
         elif days_away <= 45: window = "Weekly Deep Dive"
         else: window = "Special Scout"
+
+        # --- JUNK FILTER ---
+        junk_words = ["hours", "closed", "private", "admission", "tickets", "schedule"]
+        if any(word in title.lower() for word in junk_words):
+            continue
+
+        # --- SNIPPET CLEANUP ---
+        if len(snippet) < 15 or any(char.isdigit() for char in snippet[:10]):
+            snippet = f"Special exhibit: {title} at {m_name}."
 
         for branch in target_branches:
             entry = {
                 'place_id': branch['id'],
                 'place_name': branch.get('name', m_name),
-                'title': ev.get('title'),
+                'title': title,
                 'event_date': date_str,
-                'snippet': ev.get('snippet', f"Special event at {m_name}"),
+                'snippet': snippet,
                 'category_name': master.get('category', 'Special Activity'),
                 'zip_code': branch.get('zip_code'),
                 'window_type': window,
-                'specificity_score': 10 if "exhibit" in ev['title'].lower() else 7
+                'specificity_score': 10 if "exhibit" in title.lower() else 7,
+                'price_text': price
             }
             
             try:
                 supabase.table("events").insert(entry).execute()
             except Exception as e:
-                print(f"      ❌ DB Insert Fail: {e}")
+                print(f"      ❌ DB Insert Fail for '{title}': {e}")
 
 def generate_with_retry(prompt, text_content, context_name="General"):
     """Centralized AI call logic with linear backoff (12s/24s/36s)."""
@@ -273,64 +317,68 @@ def get_daily_batch(limit=24):
 def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    limit_str = (datetime.now() + timedelta(days=90)).strftime('%Y-%m-%d')
+    
+    today_dt = datetime.now()
+    today_str = today_dt.strftime('%Y-%m-%d')
+    limit_str = (today_dt + timedelta(days=90)).strftime('%Y-%m-%d')
     
     try:
-        print(f"📡 Scoping: {master['name']} (ID: {master['id']})")
+        print(f"📡 Deep-Scanning: {master['name']} (ID: {master['id']})")
         
-        # 1. Human-like navigation
+        # 🛡️ STEALTH & HEADERS
+        page.set_extra_http_headers({
+            "Referer": "https://www.google.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36..."
+        })
+
+        # Navigate with a generous timeout
         page.goto(url, wait_until="networkidle", timeout=60000)
+
+        # 🖱️ DYNAMIC LOADING (Crucial for IDs 2, 3, 4)
+        # Scroll slowly to trigger lazy-loaded museum cards
+        for i in range(3):
+            page.mouse.wheel(0, 700)
+            time.sleep(1.5)
         
-        # 2. Force content to load by scrolling and waiting for common containers
-        # This is vital for ID 3 (Exploratorium) and ID 4 (CDM)
-        page.evaluate("window.scrollTo(0, 800)")
-        time.sleep(3)
-        
-        # 3. Capture only the MAIN content area to avoid "Museum Hours" in footer
-        # We try to grab the main calendar/content area specifically
-        main_content = page.evaluate("""() => {
-            const main = document.querySelector('main') || document.querySelector('#content') || document.body;
-            return main.innerText;
+        # 🧩 SMART EXTRACTION: Focus on main content, skip headers/footers
+        # This prevents the AI from seeing "Museum Hours" in the footer.
+        content_area = page.evaluate("""() => {
+            const selectors = ['main', 'article', '#content', '.calendar', '.events-grid'];
+            for (let s of selectors) {
+                let el = document.querySelector(s);
+                if (el && el.innerText.length > 200) return el.innerText;
+            }
+            return document.body.innerText; // Fallback
         }""")
 
-        # 4. THE QUALITY FILTER PROMPT
+        # 🧠 THE "SPECIAL EXHIBIT" PROMPT
         prompt = f"""
-        Extract ONLY high-quality special events for {master['name']}.
-        TODAY IS: {today_str}. WINDOW: {today_str} to {limit_str}.
+        Extract only HIGH-VALUE special events/exhibits for {master['name']}.
+        Current Date: {today_str}. 
+        Valid Range: {today_str} to {limit_str}.
 
-        STRICT EXCLUSION LIST (Ignore these completely):
-        - "Museum Hours", "Open Daily", "Closed today"
-        - "Private Party", "Private Event", "Early Closure"
-        - "General Admission", "Tickets", "Members only"
-        - Navigation menus like "Visit", "Donate", "About Us"
-        - Generic titles like "Today's Schedule" or "Daily Activities"
+        STRICT QUALITY RULES:
+        1. ONLY extract named exhibits, workshops, or seasonal festivals.
+        2. IGNORE "Daily Hours", "General Admission", "Private Events", or "Closures".
+        3. IGNORE standard museum navigation links.
+        4. If an exhibit is 'Permanent' or 'Featured' but has no date, use "{today_str}".
+        5. snippet MUST be a unique description. Do NOT include dates/times in snippet.
 
-        ONLY EXTRACT:
-        - Named exhibits (e.g., "The Science of Sharks")
-        - Specific workshops (e.g., "Robot Building Class")
-        - Holiday/Seasonal festivals
-        - Special performances or guest speakers
-
-        JSON format: ["title", "event_date" (YYYY-MM-DD), "snippet" (descriptive only), "price_text"]
+        FORMAT: Return a JSON LIST of objects:
+        [
+          {{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "..."}}
+        ]
         """
         
-        events = generate_with_retry(prompt, main_content, master['name'])
+        # Generate with Gemini
+        events = generate_with_retry(prompt, content_area, master['name'])
         
-        # Filter out junk results that the AI might have missed
-        filtered_events = []
-        if events:
-            junk_keywords = ["schedule", "hours", "close", "admission", "daily", "private"]
-            for ev in events:
-                title_low = ev.get('title', '').lower()
-                if not any(k in title_low for k in junk_keywords):
-                    filtered_events.append(ev)
-
-        save_events(filtered_events, target_branches, midnight, master, mode)
+        # Call save_events (Timestamp update is handled inside save_events)
+        save_events(events or [], target_branches, midnight, master, mode)
         
     except Exception as e:
-        print(f"   ❌ Crash on ID {master['id']}: {e}")
-        # SAFETY: Update timestamp even if it crashes so we don't get stuck
+        print(f"   ❌ Error Scoping ID {master['id']} ({master['name']}): {e}")
+        # Always attempt to update timestamp so the dashboard stays fresh
         try:
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
         except: pass
