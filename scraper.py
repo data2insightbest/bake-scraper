@@ -158,7 +158,7 @@ def save_events(events, target_branches, midnight, master, mode):
 
         # --- JUNK & HALLUCINATION CLEANUP ---
         title_low = title.lower()
-        if any(j in title_low for j in ["incoming", "hours", "schedule", "admission", "closed"]):
+        if any(j in title_low for j in ["incoming", "hours", "schedule", "admission", "closed", "private", "get started", "basics", "iphone", "ipad", "mac", "skills", "photo walk", "video walk"]):
             continue
             
         # If Gemini quotes the prompt or returns a placeholder snippet
@@ -342,7 +342,7 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
 
         # 🧠 THE DYNAMIC PROMPT: No hard-coded dates
         prompt = f"""
-        Find specific special events or exhibits at {master['name']}.
+        Extract ONLY family-friendly special events or exhibits at {master['name']}.
         TODAY'S DATE: {today_str}.
         
         STRICT RULES:
@@ -351,6 +351,8 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
         3. If an exhibit is 'New' or 'Featured' but has no specific date, use {today_str}.
         4. IGNORE: "Museum Hours", "Closed", "Incoming", "General Admission", "Daily".
         5. SNIPPET: Must be a descriptive sentence about the event content.
+        6. THEME: Only include events relevant to kids, families, or parenting (e.g., workshops, festivals, storytimes).
+        7. EXCLUDE TECH DEMOS: For tech-heavy places (like Apple), IGNORE generic product training like "Get Started", "Photo Walk", or "iPad Basics" UNLESS it is specifically labeled for Kids/Families.
         
         FORMAT: Return a JSON LIST of objects:
         [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "..."}}]
