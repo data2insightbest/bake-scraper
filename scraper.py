@@ -432,12 +432,12 @@ if __name__ == "__main__":
     
     # Force reset so they aren't skipped by the 'last_scraped_at' filter
     try:
-        supabase.table("places").update({"last_scraped_at": None}).in_("id", [6, 7, 8]).execute()
+        supabase.table("places").update({"last_scraped_at": None}).in_("id", [186, 187, 188, 189, 190]).execute()
     except Exception as e:
         print(f"⚠️ Note: Could not reset timestamps: {e}")
 
     # Fetch IDs 1-5 directly
-    res = supabase.table("places").select("*").in_("id", [6, 7, 8]).execute()
+    res = supabase.table("places").select("*").in_("id", [186, 187, 188, 189, 190]).execute()
     batch = res.data
 
     if batch:
