@@ -353,7 +353,8 @@ def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=N
         5. SNIPPET: Must be a descriptive sentence about the event content.
         6. THEME: Only include events relevant to kids, families, or parenting (e.g., workshops, festivals, storytimes).
         7. EXCLUDE TECH DEMOS: For tech-heavy places (like Apple), IGNORE generic product training like "Get Started", "Photo Walk", or "iPad Basics" UNLESS it is specifically labeled for Kids/Families.
-        
+        8. NO DATES IN SNIPPET: Do not repeat the date or time in the snippet field; use it only for the description of the experience.
+
         FORMAT: Return a JSON LIST of objects:
         [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "..."}}]
         """
