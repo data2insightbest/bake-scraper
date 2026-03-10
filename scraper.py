@@ -31,7 +31,17 @@ PROJECT_BANK = {
 }
 
 # --- Utility Functions ---
-
+def get_clean_text(page):
+    """Strips out scripts, styles, and footers to give Gemini clean data."""
+    return page.evaluate("""() => {
+        // 1. Remove non-content elements
+        const junk = document.querySelectorAll('script, style, footer, nav, header, iframe, noscript');
+        junk.forEach(el => el.remove());
+        
+        // 2. Return clean text
+        return document.body.innerText.replace(/\\s+/g, ' ').trim();
+    }""")
+    
 def calculate_window(date_str):
     """Calculates the 3-tab window based on the event date."""
     try:
@@ -268,25 +278,37 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
         # 4. CAPTURE ALL DATA (Main + Iframes)
         # By getting text AFTER the exhaustive scroll, we capture 'Featured' sections that were hidden
-        all_text = [page.evaluate("document.body.innerText")]
-        for frame in page.frames:
-            try:
-                f_text = frame.evaluate("document.body.innerText")
-                if len(f_text) > 50: all_text.append(f_text)
-            except: continue
-        combined_text = "\n---\n".join(all_text)
-        
+        # NEW: Optimized clean capture
+        combined_text = get_clean_text(page)
         # 5. The 90-Day Sliding Prompt
+        # Force a shorter, stricter JSON structure to avoid "Delimiter" errors
         prompt = f"""
-        Today is {today.strftime('%B %d, %Y')}. 
-        Find ALL upcoming public events, workshops, or special exhibits for {master['name']} between {range_str}.
-        I need the 'New and Featured' events as well as recurring programs.
-        Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location"].
+        Extract events at {master['name']} from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
         Rules:
-        1. Year must be 2026.
-        2. If no specific 'kids' events found, include family-friendly programs.
-        3. Return ONLY the JSON list []. If none, return [].
-        """
+        1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "..."}}]
+        2. Snippet must be 1 sentence describing the activity.
+        3. If no events found, return [].
+        4. If no specific 'kids' events found, include family-friendly programs.
+        
+        
+        
+        #all_text = [page.evaluate("document.body.innerText")]
+        #for frame in page.frames:
+        #    try:
+        #        f_text = frame.evaluate("document.body.innerText")
+        #        if len(f_text) > 50: all_text.append(f_text)
+        #    except: continue
+        #combined_text = "\n---\n".join(all_text)
+        # 5. The 90-Day Sliding Prompt
+        #prompt = f"""
+        #Today is {today.strftime('%B %d, %Y')}. 
+        #Find ALL upcoming public events, workshops, or special exhibits for {master['name']} between {range_str}.
+        #I need the 'New and Featured' events as well as recurring programs.
+        #Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location"].
+        #Rules:
+        #1. Year must be 2026.
+        #2. If no specific 'kids' events found, include family-friendly programs.
+        #3. Return ONLY the JSON list []. If none, return [].
         
         events = generate_with_retry(prompt, combined_text, master['name'])
 
@@ -423,7 +445,7 @@ def run_scraper():
                 for branch in branches:
                     time.sleep(random.uniform(1.5, 3.5))
                     # Route to general scraper (likely scrape_and_save_2)
-                    scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch['zip_code'])
+                    scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
             
             # 3. LIBRARIES
             elif "library" in name_low:
