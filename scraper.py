@@ -206,104 +206,103 @@ def generate_with_retry(prompt, text_content, context_name="General"):
                 break 
     return []
 
-#def get_daily_batch(limit=24):
- #   """Reverted logic to fix nulls_first crash while keeping ID sorting."""
-  #  three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
+def get_daily_batch(limit=24):
+    """Reverted logic to fix nulls_first crash while keeping ID sorting."""
+    three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
     # 1. Sort by last_scraped_at (NULLs naturally group together)
     # 2. Sort by ID (Ensures ID 1, 2, 3 come first within the NULL group)
-   # res = supabase.table("places")\
-    #    .select("*")\
-     #   .eq("is_master", True)\
-      #  .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}")\
-       # .order("last_scraped_at")\
-        #.order("id")\
-        #.limit(limit)\
-        #.execute()
-    #return res.data
- 
-def get_daily_batch(limit=24):
-    """Modified to strictly test IDs 1 through 5 only."""
-    # We remove the three_days_ago filter to ensure we grab these 5 regardless of status
     res = supabase.table("places")\
         .select("*")\
-        .in_("id", [1])\
+        .eq("is_master", True)\
+        .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}")\
+        .order("last_scraped_at")\
         .order("id")\
         .limit(limit)\
         .execute()
     return res.data
+ 
+#def get_daily_batch(limit=24):
+#    """Modified to strictly test IDs 1 through 5 only."""
+    # We remove the three_days_ago filter to ensure we grab these 5 regardless of status
+#    res = supabase.table("places")\
+#        .select("*")\
+#        .in_("id", [1])\
+#        .order("id")\
+#        .limit(limit)\
+#        .execute()
+#    return res.data
        
-# --- Scraper Pathway ---
-# this function works for the category of workshop, but not others
-#def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
-#    page = context.new_page()
-#    url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
+# --- Scraper Pathway --- this function works for the category of workshop, but not others
+def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code=None):
+    page = context.new_page()
+    url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
 
-#    today = datetime.now()
-#    future_date = today + timedelta(days=90)
-#    range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
+    today = datetime.now()
+    future_date = today + timedelta(days=90)
+    range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
     
-#    try:
-#        # 1. Navigation with 'networkidle' to catch initial API calls
-#        page.goto(url, wait_until="networkidle", timeout=90000)
+    try:
+        # 1. Navigation with 'networkidle' to catch initial API calls
+        page.goto(url, wait_until="networkidle", timeout=90000)
         
-#        if mode == "specific" and zip_code:
-#            try:
-#                search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
-#                search_field.wait_for(state="visible", timeout=10000)
-#                search_field.fill(str(zip_code))
-#                page.keyboard.press("Enter")
-#                time.sleep(10) 
-#            except: pass
+        if mode == "specific" and zip_code:
+            try:
+                search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
+                search_field.wait_for(state="visible", timeout=10000)
+                search_field.fill(str(zip_code))
+                page.keyboard.press("Enter")
+                time.sleep(10) 
+            except: pass
 
-#        if mode != "specific":
-#            # 2. UNIVERSAL FIX: Exhaustive Scroll
-#            # We scroll to the very bottom in small increments to trigger 'Lazy Loading' cards
-#            print(f"   🖱️ Scrolling {master['name']} to trigger lazy-load...")
-#            for _ in range(8):
-#                page.evaluate("window.scrollBy(0, window.innerHeight)")
-#                time.sleep(2) # Give the images/text time to 'pop' in
+        if mode != "specific":
+            # 2. UNIVERSAL FIX: Exhaustive Scroll
+            # We scroll to the very bottom in small increments to trigger 'Lazy Loading' cards
+            print(f"   🖱️ Scrolling {master['name']} to trigger lazy-load...")
+            for _ in range(8):
+                page.evaluate("window.scrollBy(0, window.innerHeight)")
+                time.sleep(2) # Give the images/text time to 'pop' in
             
-#            # 3. Buffer for any final background data
-#            time.sleep(5) 
-#            page.screenshot(path=f"debug_{re.sub(r'\W+', '', master['name'])}.png")
+            # 3. Buffer for any final background data
+            time.sleep(5) 
+            page.screenshot(path=f"debug_{re.sub(r'\W+', '', master['name'])}.png")
 
-#        # 4. CAPTURE ALL DATA (Main + Iframes)
-#        # By getting text AFTER the exhaustive scroll, we capture 'Featured' sections that were hidden
-#        all_text = [page.evaluate("document.body.innerText")]
-#        for frame in page.frames:
-#            try:
-#                f_text = frame.evaluate("document.body.innerText")
-#                if len(f_text) > 50: all_text.append(f_text)
-#            except: continue
-#        combined_text = "\n---\n".join(all_text)
+        # 4. CAPTURE ALL DATA (Main + Iframes)
+        # By getting text AFTER the exhaustive scroll, we capture 'Featured' sections that were hidden
+        all_text = [page.evaluate("document.body.innerText")]
+        for frame in page.frames:
+            try:
+                f_text = frame.evaluate("document.body.innerText")
+                if len(f_text) > 50: all_text.append(f_text)
+            except: continue
+        combined_text = "\n---\n".join(all_text)
         
-#        # 5. The 90-Day Sliding Prompt
-#        prompt = f"""
-#        Today is {today.strftime('%B %d, %Y')}. 
-#        Find ALL upcoming public events, workshops, or special exhibits for {master['name']} between {range_str}.
-#        I need the 'New and Featured' events as well as recurring programs.
-#        Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location"].
-#        Rules:
-#        1. Year must be 2026.
-#        2. If no specific 'kids' events found, include family-friendly programs.
-#        3. Return ONLY the JSON list []. If none, return [].
-#        """
+        # 5. The 90-Day Sliding Prompt
+        prompt = f"""
+        Today is {today.strftime('%B %d, %Y')}. 
+        Find ALL upcoming public events, workshops, or special exhibits for {master['name']} between {range_str}.
+        I need the 'New and Featured' events as well as recurring programs.
+        Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location"].
+        Rules:
+        1. Year must be 2026.
+        2. If no specific 'kids' events found, include family-friendly programs.
+        3. Return ONLY the JSON list []. If none, return [].
+        """
         
-#        events = generate_with_retry(prompt, combined_text, master['name'])
+        events = generate_with_retry(prompt, combined_text, master['name'])
 
-#        if events:
-#            save_events(events, target_branches, midnight, master, mode)
-#            print(f"   ✅ Successfully found {len(events)} events for {master['name']}.")
-#        else:
-#            print(f"   ⚠️ Gemini found 0 events for {master['name']} in the {range_str} window.")
+        if events:
+            save_events(events, target_branches, midnight, master, mode)
+            print(f"   ✅ Successfully found {len(events)} events for {master['name']}.")
+        else:
+            print(f"   ⚠️ Gemini found 0 events for {master['name']} in the {range_str} window.")
             
-#    except Exception as e:
-#        print(f"❌ Error scraping {master['name']}: {e}")
-#    finally:
-#        page.close()
+    except Exception as e:
+        print(f"❌ Error scraping {master['name']}: {e}")
+    finally:
+        page.close()
 
 import random
-def scrape_and_save(context, master, target_branches, mode, midnight, zip_code=None):
+def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
@@ -392,70 +391,80 @@ def run_scraper():
     if not masters: return
 
     with sync_playwright() as p:
+        # Using a standard desktop user agent often helps with ID 3 & 5 blocks
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=MOBILE_USER_AGENT)
         
         for m in masters:
+            # Mark as scraped immediately
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
+            
+            # Fetch affiliated branches
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches: continue
             
             name_low = m['name'].lower().replace("’", "'")
+            category_low = (m.get('category_name') or "").lower() # Ensure this matches your column name
             
+            # 1. HYBRID RETAIL (Home Depot/Lowes)
             if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
                 print(f"🛡️ Hybrid: {m['name']}")
                 save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m, "global")
 
+            # 2. SPECIFIC BRANCH SCRAPING (Lego/Barnes/Slime)
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
                 print(f"🔍 Dynamic: {m['name']}")
                 for branch in branches:
                     time.sleep(random.uniform(1.5, 3.5))
-                    scrape_and_save(context, m, [branch], "specific", midnight_today, branch['zip_code'])
+                    # Route to general scraper (likely scrape_and_save_2)
+                    scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch['zip_code'])
             
+            # 3. LIBRARIES
             elif "library" in name_low:
                 print(f"📚 Library Mapping: {m['name']}")
                 time.sleep(random.uniform(2.0, 4.0))
-                scrape_and_save(context, m, branches, "mapping", midnight_today)
+                scrape_and_save_1(context, m, [branch], "mapping", midnight_today)
             
+            # 4. CATEGORY-BASED ROUTING (The Workshop Logic)
             else:
-                print(f"🌐 Universal Scrape: {m['name']}")
-                scrape_and_save(context, m, branches, "global", midnight_today)
-
+                print(f"🌐 Universal Scrape (Type 2): {m['name']}")
+                scrape_and_save_2(context, master, [master], "mapping", midnight)
         browser.close()
+    # Run the AI discovery for events with missing descriptions
     run_gemini_discovery(midnight_today)
-
-#if __name__ == "__main__":
-#    run_scraper()
-if __name__ == "__main__":
-    midnight = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
     
-    print("🚀 STARTING TARGETED TEST FOR IDs 1-5...")
+if __name__ == "__main__":
+    run_scraper()
+#if __name__ == "__main__":
+#    midnight = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
+    
+#    print("🚀 STARTING TARGETED TEST FOR IDs 1-5...")
     
     # Force reset so they aren't skipped by the 'last_scraped_at' filter
-    try:
-        supabase.table("places").update({"last_scraped_at": None}).gte("id", 9).lte("id", 185).execute()
-    except Exception as e:
-        print(f"⚠️ Note: Could not reset timestamps: {e}")
+#    try:
+#        supabase.table("places").update({"last_scraped_at": None}).gte("id", 9).lte("id", 185).execute()
+#    except Exception as e:
+#        print(f"⚠️ Note: Could not reset timestamps: {e}")
 
     # Fetch IDs 1-5 directly
-    res = supabase.table("places").select("*").gte("id", 9).lte("id", 185).execute()
-    batch = res.data
+#    res = supabase.table("places").select("*").gte("id", 9).lte("id", 185).execute()
+#    batch = res.data
 
-    if batch:
-        with sync_playwright() as p:
+#    if batch:
+#        with sync_playwright() as p:
             # Launch with 'Stealth' mode enabled
-            browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+#            browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
             
             # Use a Desktop context to ensure the 'Exhibits' layout is full-width
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            )
+#            context = browser.new_context(
+#                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+#            )
             
-            for master in batch:
+#            for master in batch:
                 # We pass [master] as the 'target_branches' because in your current 
                 # setup, the master IS the place we want to save to.
-                scrape_and_save(context, master, [master], "mapping", midnight)
+#                scrape_and_save(context, master, [master], "mapping", midnight)
             
-            browser.close()
-    else:
-        print("❌ Could not find IDs 1-5 in the places table.")
+#            browser.close()
+#    else:
+#        print("❌ Could not find IDs 1-5 in the places table.")
