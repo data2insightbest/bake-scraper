@@ -403,9 +403,15 @@ def run_scraper():
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches: continue
             
-            name_low = m['name'].lower().replace("’", "'")
-            category_low = (m.get('category_name') or "").lower() # Ensure this matches your column name
-            
+           # name_low = m['name'].lower().replace("’", "'")
+           # category_low = (m.get('category_name') or "").lower() # Ensure this matches your column name
+           
+           # Use .get() and a fallback "" for BOTH name and category
+           name_raw = m.get('name') or "Unknown Place"
+           name_low = name_raw.lower().replace("’", "'")
+           category_raw = m.get('category_name') or ""
+           category_low = category_raw.lower()
+
             # 1. HYBRID RETAIL (Home Depot/Lowes)
             if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
                 print(f"🛡️ Hybrid: {m['name']}")
@@ -423,12 +429,13 @@ def run_scraper():
             elif "library" in name_low:
                 print(f"📚 Library Mapping: {m['name']}")
                 time.sleep(random.uniform(2.0, 4.0))
-                scrape_and_save_1(context, m, [branch], "mapping", midnight_today)
-            
-            # 4. CATEGORY-BASED ROUTING (The Workshop Logic)
+                scrape_and_save_1(context, m, branches, "mapping", midnight_today)
+
+            # 4. UNIVERSAL / MUSEUM SITES (the non-workshop category)
             else:
-                print(f"🌐 Universal Scrape (Type 2): {m['name']}")
-                scrape_and_save_2(context, master, [master], "mapping", midnight)
+                print(f"🌐 Universal/Museum Scrape (Type 2): {m['name']}")
+                scrape_and_save_2(context, m, branches, "global", midnight_today)
+            
         browser.close()
     # Run the AI discovery for events with missing descriptions
     run_gemini_discovery(midnight_today)
