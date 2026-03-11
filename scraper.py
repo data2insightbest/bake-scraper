@@ -418,9 +418,9 @@ def run_scraper():
 
     with sync_playwright() as p:
         # Using a standard desktop user agent often helps with ID 3 & 5 blocks
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=MOBILE_USER_AGENT)
-        
+        browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+        DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
         for m in masters:
             # Mark as scraped immediately
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
