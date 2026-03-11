@@ -429,10 +429,10 @@ def run_scraper():
            # category_low = (m.get('category_name') or "").lower() # Ensure this matches your column name
            
            # Use .get() and a fallback "" for BOTH name and category
-           name_raw = m.get('name') or "Unknown Place"
-           name_low = name_raw.lower().replace("’", "'")
-           category_raw = m.get('category_name') or ""
-           category_low = category_raw.lower()
+            name_raw = m.get('name') or "Unknown Place"
+            name_low = name_raw.lower().replace("’", "'")
+            category_raw = m.get('category_name') or ""
+            category_low = category_raw.lower()
 
             # 1. HYBRID RETAIL (Home Depot/Lowes)
             if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
