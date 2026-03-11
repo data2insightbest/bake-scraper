@@ -289,8 +289,9 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         2. Snippet must be 1 sentence describing the activity.
         3. If no events found, return [].
         4. If no specific 'kids' events found, include family-friendly programs.
-        
-        
+        5. TARGET: Only include events for children (0-12), teens, or families.
+        6. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
+        7. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
         
         #all_text = [page.evaluate("document.body.innerText")]
         #for frame in page.frames:
