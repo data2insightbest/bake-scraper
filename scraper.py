@@ -135,11 +135,17 @@ def save_events(events, target_branches, midnight, master, mode):
 
     if not events:
         return
-
-    # Delete existing data for the 90-day future window to avoid duplicates
+        
+    # Delete existing data for the 90-day future window for these specific branches
+    branch_ids = [b['id'] for b in target_branches]
     limit_date = today + timedelta(days=90)
-    supabase.table("events").delete().eq("place_id", m_id).gte("event_date", today.isoformat()).lte("event_date", limit_date.isoformat()).execute()
-
+    if branch_ids:
+        supabase.table("events").delete() \
+            .in_("place_id", branch_ids) \
+            .gte("event_date", today.isoformat()) \
+            .lte("event_date", limit_date.isoformat()) \
+            .execute()
+    
     for ev in events:
         # Normalize AI output (List vs Dict)
         if isinstance(ev, list):
@@ -188,7 +194,7 @@ def save_events(events, target_branches, midnight, master, mode):
                 'title': title,
                 'event_date': date_str,
                 'snippet': snippet,
-                'category_name': master.get('category', 'Special Activity'),
+                'category_name': master.get('category_name', 'Special Activity'),
                 'zip_code': branch.get('zip_code'),
                 'window_type': window,
                 'specificity_score': 10 if "exhibit" in title_low else 7
@@ -300,7 +306,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         7. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
         8. LOCATION: Identify which specific branch the event is at. 
         9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
-        Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet"].
+        Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "price_text", "snippet", "found_location"].
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
         """
         
@@ -455,14 +461,14 @@ def run_scraper():
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
                 print(f"🔍 Dynamic: {m['name']}")
                 if "barnes" in name_low:
-                        # B&N requires individual zip code searches
-                        for branch in branches:
-                            time.sleep(random.uniform(1.5, 3.5))
-                            scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
-                    else:
-                        # Slime and Lego: Scrape once, map to all branches in one go
-                        time.sleep(random.uniform(2.0, 4.0))
-                        scrape_and_save_1(context, m, branches, "mapping", midnight_today)
+                    # B&N requires individual zip code searches
+                    for branch in branches:
+                        time.sleep(random.uniform(1.5, 3.5))
+                        scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
+                else:
+                    # Slime and Lego: Scrape once, map to all branches in one go
+                    time.sleep(random.uniform(2.0, 4.0))
+                    scrape_and_save_1(context, m, branches, "mapping", midnight_today)
           
             # 3. LIBRARIES
             elif "library" in name_low:
