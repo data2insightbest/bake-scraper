@@ -180,12 +180,23 @@ def save_events(events, target_branches, midnight, master, mode):
         # If Gemini quotes the prompt or returns a placeholder snippet
         if "featured exhibit" in snippet.lower() or len(snippet) < 15:
             snippet = f"Special program: {title} at {m_name}."
-
+    
         for branch in target_branches:
-            found_loc = ev.get('found_location', 'All').lower()
+            found_loc = (ev.get('found_location') or ev.get('found_at') or "all").lower()
             branch_name = branch.get('name', '').lower()
+            # Remove special characters like & and - for better matching
+            clean_found = re.sub(r'[^a-z0-9]', '', found_loc)
+            clean_branch = re.sub(r'[^a-z0-9]', '', branch_name)
+            # 1. If Gemini says 'all', save it.
+            # 2. If Gemini didn't provide a location (Academy case), save it.
+            # 3. If the branch name is inside the found location (or vice versa), save it.
             # LOGIC: Save if it's for 'All' branches, OR if the branch name appears in the event's location text
-            should_save = (found_loc == "all") or (found_loc in branch_name) or (branch_name in found_loc)
+            should_save = (
+                "all" in clean_found or 
+                not ev.get('found_location') or 
+                clean_found in clean_branch or 
+                clean_branch in clean_found
+            )
             if not should_save:
                  continue # Skip this branch if it's not the right match
             entry = {
@@ -213,6 +224,11 @@ def generate_with_retry(prompt, text_content, context_name="General"):
                 contents=[prompt, text_content[:25000]]
             )
             res_text = response.text.strip()
+            # If the AI forgot to close the list because it cut off:
+            if res_text.endswith('}') and not res_text.endswith(']'):
+                res_text += ']'
+            if not res_text.startswith('['):
+                res_text = '[' + res_text
             json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
             
             if json_match:
@@ -306,6 +322,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         7. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
         8. LOCATION: Identify which specific branch the event is at. 
         9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
+        10. Extract as many events as possible (up to 30). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object.
         Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "price_text", "snippet", "found_location"].
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
         """
