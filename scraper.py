@@ -273,9 +273,9 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 search_field.wait_for(state="visible", timeout=10000)
                 search_field.fill(str(zip_code))
                 page.keyboard.press("Enter")
-                time.sleep(10) 
+                time.sleep(12) 
             except: pass
-
+        
         if mode != "specific":
             # 2. UNIVERSAL FIX: Exhaustive Scroll
             # We scroll to the very bottom in small increments to trigger 'Lazy Loading' cards
@@ -464,13 +464,13 @@ def run_scraper():
                 if "barnes" in name_low:
                     # B&N requires individual zip code searches
                     for branch in branches:
-                        time.sleep(random.uniform(1.5, 3.5))
+                        time.sleep(random.uniform(2.0, 4.0))
                         scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
                 else:
                     # Slime and Lego: Scrape once, map to all branches in one go
-                    time.sleep(random.uniform(2.0, 4.0))
+                    time.sleep(random.uniform(3.0, 5.0))
                     scrape_and_save_1(context, m, branches, "mapping", midnight_today)
-          
+            
             # 3. LIBRARIES
             elif "library" in name_low:
                 print(f"📚 Library Mapping: {m['name']}")
