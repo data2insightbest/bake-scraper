@@ -223,6 +223,10 @@ def generate_with_retry(prompt, text_content, context_name="General"):
                 model='gemini-2.0-flash', 
                 contents=[prompt, text_content[:25000]]
             )
+            # 1. Check if response has text at all
+            if not response or not hasattr(response, 'text') or not response.text:
+                print(f"   ⚠️ AI returned empty response for {context_name}")
+                continue
             res_text = response.text.strip()
             # If the AI forgot to close the list because it cut off:
             if res_text.endswith('}') and not res_text.endswith(']'):
@@ -232,12 +236,25 @@ def generate_with_retry(prompt, text_content, context_name="General"):
             json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
             
             if json_match:
-                return json.loads(json_match.group(0))
+                raw_json = json_match.group(0)
+                try:
+                    return json.loads(raw_json)
+                except json.JSONDecodeError:
+                    # REPAIR: If it's just a missing closing bracket
+                    if not raw_json.endswith(']'):
+                        try:
+                            return json.loads(raw_json + ']')
+                        except: pass
+            
+            # DEBUG: If we get here, the AI spoke but didn't give JSON
+            print(f"   ⚠️ AI gave non-JSON response for {context_name}: {res_text[:50]}...")
             return []
+
         except Exception as e:
+            # KEEP: Your 429 Rate Limit logic
             if "429" in str(e):
-                wait_time = (attempt + 1) * 12
-                print(f"   ⏳ Rate limited (429). Waiting {wait_time}s to retry {context_name}...")
+                wait_time = (attempt + 1) * 15
+                print(f"   ⏳ Rate limited. Waiting {wait_time}s...")
                 time.sleep(wait_time)
             else:
                 print(f"   ⚠️ AI Error for {context_name}: {e}")
