@@ -194,7 +194,7 @@ def save_events(events, target_branches, midnight, master, mode):
                 'title': title,
                 'event_date': date_str,
                 'snippet': snippet,
-                'category_name': master.get('category_name', 'Special Activity'),
+                'category_name': master.get('category_name') or master.get('category') or 'Special Activity',
                 'zip_code': branch.get('zip_code'),
                 'window_type': window,
                 'specificity_score': 10 if "exhibit" in title_low else 7
@@ -441,7 +441,8 @@ def run_scraper():
             
             # Fetch affiliated branches
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
-            if not branches: continue
+            if not branches:
+                branches = [m] # This is vital for single-location sites like Academy!
             
            # name_low = m['name'].lower().replace("’", "'")
            # category_low = (m.get('category_name') or "").lower() # Ensure this matches your column name
