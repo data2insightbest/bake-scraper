@@ -228,30 +228,35 @@ def generate_with_retry(prompt, text_content, context_name="General"):
                 print(f"   ⚠️ AI returned empty response for {context_name}")
                 continue
             res_text = response.text.strip()
-            # If the AI forgot to close the list because it cut off:
-            if res_text.endswith('}') and not res_text.endswith(']'):
-                res_text += ']'
-            if not res_text.startswith('['):
-                res_text = '[' + res_text
-            json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
+            json_match = re.search(r'\[\s*\{.*\}\s*\]', res_text, re.DOTALL)
             
             if json_match:
                 raw_json = json_match.group(0)
                 try:
                     return json.loads(raw_json)
                 except json.JSONDecodeError:
-                    # REPAIR: If it's just a missing closing bracket
+                    # REPAIR: Handle the common "cut off" issue
                     if not raw_json.endswith(']'):
                         try:
-                            return json.loads(raw_json + ']')
+                            # Try adding just the bracket, or a brace and a bracket
+                            for fix in [']', '}]', '"}]']:
+                                try:
+                                    return json.loads(raw_json + fix)
+                                except: continue
                         except: pass
             
-            # DEBUG: If we get here, the AI spoke but didn't give JSON
-            print(f"   ⚠️ AI gave non-JSON response for {context_name}: {res_text[:50]}...")
+            # 2. FALLBACK: If regex missed it but it's wrapped in backticks
+            clean_text = re.sub(r'```json\s*|```', '', res_text).strip()
+            try:
+                return json.loads(clean_text)
+            except:
+                pass
+
+            # DEBUG: Only print this if all parsing attempts failed
+            print(f"   ⚠️ AI gave non-JSON response for {context_name}: {res_text[:60]}...")
             return []
 
         except Exception as e:
-            # KEEP: Your 429 Rate Limit logic
             if "429" in str(e):
                 wait_time = (attempt + 1) * 15
                 print(f"   ⏳ Rate limited. Waiting {wait_time}s...")
@@ -298,7 +303,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     
     try:
         # 1. Navigation with 'networkidle' to catch initial API calls
-        page.goto(url, wait_until="networkidle", timeout=90000)
+        page.set_extra_http_headers({
+            "Referer": "https://www.google.com/",
+            "Accept-Language": "en-US,en;q=0.9"
+        })
+        page.goto(url, wait_until="domcontentloaded", timeout=90000)
         
         if mode == "specific" and zip_code:
             try:
