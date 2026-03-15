@@ -176,6 +176,12 @@ def save_events(events, target_branches, midnight, master, mode):
             snippet = f"Special program: {title} at {m_name}."
 
         for branch in target_branches:
+            found_loc = ev.get('found_location', 'All').lower()
+            branch_name = branch.get('name', '').lower()
+            # LOGIC: Save if it's for 'All' branches, OR if the branch name appears in the event's location text
+            should_save = (found_loc == "all") or (found_loc in branch_name) or (branch_name in found_loc)
+            if not should_save:
+                 continue # Skip this branch if it's not the right match
             entry = {
                 'place_id': branch['id'],
                 'place_name': branch.get('name', m_name),
@@ -292,6 +298,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         5. TARGET: Only include events for children (0-12), teens, or families.
         6. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
         7. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
+        8. LOCATION: Identify which specific branch the event is at. 
+        9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
         Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet"].
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
         """
@@ -446,11 +454,16 @@ def run_scraper():
             # 2. SPECIFIC BRANCH SCRAPING (Lego/Barnes/Slime)
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
                 print(f"🔍 Dynamic: {m['name']}")
-                for branch in branches:
-                    time.sleep(random.uniform(1.5, 3.5))
-                    # Route to general scraper (likely scrape_and_save_2)
-                    scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
-            
+                if "barnes" in name_low:
+                        # B&N requires individual zip code searches
+                        for branch in branches:
+                            time.sleep(random.uniform(1.5, 3.5))
+                            scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
+                    else:
+                        # Slime and Lego: Scrape once, map to all branches in one go
+                        time.sleep(random.uniform(2.0, 4.0))
+                        scrape_and_save_1(context, m, branches, "mapping", midnight_today)
+          
             # 3. LIBRARIES
             elif "library" in name_low:
                 print(f"📚 Library Mapping: {m['name']}")
