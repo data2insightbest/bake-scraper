@@ -307,9 +307,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     try:
         # 1. Navigation with 'networkidle' to catch initial API calls
         page.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.google.com/"
+            "Referer": "https://www.google.com/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Upgrade-Insecure-Requests": "1"
         })
         page.goto(url, wait_until="domcontentloaded", timeout=90000)
         page.wait_for_timeout(5000)
@@ -351,7 +353,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         5. TARGET: Only include events for children (0-12), teens, or families.
         6. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
         7. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
-        8. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Use 'All' ONLY if the event is system-wide. Do not omit the branch name.
+        8. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Use 'All' ONLY if the event is system-wide. Do not omit the branch name. If the text says 'In Store [Location]', use that location.
         9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
         10. Extract as many events as possible (up to 30). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object.
         Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "price_text", "snippet", "found_location"].
