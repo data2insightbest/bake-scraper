@@ -182,21 +182,24 @@ def save_events(events, target_branches, midnight, master, mode):
             snippet = f"Special program: {title} at {m_name}."
     
         for branch in target_branches:
-            found_loc = (ev.get('found_location') or ev.get('found_at') or "all").lower()
-            branch_name = branch.get('name', '').lower()
-            # Remove special characters like & and - for better matching
-            clean_found = re.sub(r'[^a-z0-9]', '', found_loc)
-            clean_branch = re.sub(r'[^a-z0-9]', '', branch_name)
-            # 1. If Gemini says 'all', save it.
-            # 2. If Gemini didn't provide a location (Academy case), save it.
-            # 3. If the branch name is inside the found location (or vice versa), save it.
-            # LOGIC: Save if it's for 'All' branches, OR if the branch name appears in the event's location text
-            should_save = (
-                "all" in clean_found or 
-                not ev.get('found_location') or 
-                clean_found in clean_branch or 
-                clean_branch in clean_found
-            )
+            if len(target_branches) == 1:
+                should_save = True
+            else
+                found_loc = (ev.get('found_location') or ev.get('found_at') or "all").lower()
+                branch_name = branch.get('name', '').lower()
+                # Remove special characters like & and - for better matching
+                noise_pattern = r'library|branch|store|center|museum|[^a-z0-9]' 
+                clean_found = re.sub(noise_pattern, '', found_loc)
+                clean_branch = re.sub(noise_pattern, '', branch_name)
+                
+                # Matching logic:
+                # 1. AI specifically said 'all'
+                # 2. AI provided no location (fallback to save)
+                # 3. The cleaned branch name matches the cleaned found location
+                is_all = "all" in clean_found
+                is_match = clean_branch != "" and (clean_branch in clean_found or clean_found in clean_branch) 
+                should_save = is_all or not ev.get('found_location') or is_match
+            
             if not should_save:
                  continue # Skip this branch if it's not the right match
             entry = {
@@ -304,10 +307,12 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     try:
         # 1. Navigation with 'networkidle' to catch initial API calls
         page.set_extra_http_headers({
-            "Referer": "https://www.google.com/",
-            "Accept-Language": "en-US,en;q=0.9"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.google.com/"
         })
         page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        page.wait_for_timeout(5000)
         
         if mode == "specific" and zip_code:
             try:
@@ -346,7 +351,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         5. TARGET: Only include events for children (0-12), teens, or families.
         6. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
         7. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
-        8. LOCATION: Identify which specific branch the event is at. 
+        8. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Use 'All' ONLY if the event is system-wide. Do not omit the branch name.
         9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
         10. Extract as many events as possible (up to 30). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object.
         Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "price_text", "snippet", "found_location"].
