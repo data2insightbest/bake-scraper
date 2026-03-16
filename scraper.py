@@ -145,21 +145,24 @@ def save_events(events, target_branches, midnight, master, mode):
             .gte("event_date", today.isoformat()) \
             .lte("event_date", limit_date.isoformat()) \
             .execute()
-    
+
     for ev in events:
         # Normalize AI output (List vs Dict)
         if isinstance(ev, list):
             title, r_date, snippet = ev[0], ev[1], ev[2]
         else:
             title = ev.get('title', 'Special Event')
-            r_date = ev.get('event_date', str(today))
+            r_date = ev.get('event_date', 'UNKNOWN')
             snippet = ev.get('snippet', '')
 
         # Use our improved is_valid_date (no hard-coded 2024)
         date_str = is_valid_date(r_date)
-        if not date_str: continue
+        if not date_str or r_date == 'UNKNOWN': 
+            continue
         
         ev_dt = datetime.strptime(date_str, '%Y-%m-%d').date()
+        if ev_dt == today:
+            continue 
         days_away = (ev_dt - today).days
         
         # --- YOUR 3 STRICT CATEGORIES ---
@@ -213,9 +216,23 @@ def save_events(events, target_branches, midnight, master, mode):
                 'window_type': window,
                 'specificity_score': 10 if "exhibit" in title_low else 7
             }
+            
+            
             try:
-                supabase.table("events").insert(entry).execute()
-            except: pass
+                # Check for existing duplicate before inserting
+                existing = supabase.table("events").select("id") \
+                    .eq("place_id", branch['id']) \
+                    .eq("title", title) \
+                    .eq("event_date", date_str) \
+                    .execute()
+                
+                if not existing.data:
+                    supabase.table("events").insert(entry).execute()
+                else:
+                    # Optional: print(f"      ⏭️ Skipping duplicate: {title}")
+                    pass
+            except Exception as e: 
+                print(f"      ⚠️ Database error: {e}")
 
 def generate_with_retry(prompt, text_content, context_name="General"):
     """Centralized AI call logic with linear backoff (12s/24s/36s)."""
@@ -298,8 +315,9 @@ def get_daily_batch(limit=24):
 # --- Scraper Pathway --- this function works for the category of workshop, but not others
 def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
+    page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
-
+    
     today = datetime.now()
     future_date = today + timedelta(days=90)
     range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
@@ -313,7 +331,12 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Upgrade-Insecure-Requests": "1"
         })
-        page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        try:
+            page.goto(url, wait_until="networkidle", timeout=90000)
+        except Exception as e:
+            # If networkidle fails (some sites keep "chatting" in the background),
+            # it will timeout. We catch that and proceed anyway.
+            print(f"   ⚠️ Networkidle timeout for {master['name']}, proceeding with current data.")
         page.wait_for_timeout(5000)
         
         if mode == "specific" and zip_code:
@@ -347,16 +370,18 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         Extract events at {master['name']} from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
         Rules:
         1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "..."}}]
-        2. Snippet must be 1 sentence describing the activity.
-        3. If no events found, return [].
-        4. If no specific 'kids' events found, include family-friendly programs.
-        5. TARGET: Only include events for children (0-12), teens, or families.
-        6. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
-        7. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
-        8. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Use 'All' ONLY if the event is system-wide. Do not omit the branch name. If the text says 'In Store [Location]', use that location.
-        9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
-        10. Extract as many events as possible (up to 30). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object.
-        Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "price_text", "snippet", "found_location"].
+        2. DATE RULE: You must find the specific date. If the text says 'Every Monday', calculate the next 3 Mondays starting after {today.strftime('%B %d, %Y')}. 
+           IMPORTANT: If NO specific date is found, use 'UNKNOWN' for event_date. DO NOT use today's date ({today.strftime('%Y-%m-%d')}) as a fallback.
+        3. Snippet must be 1 sentence describing the activity.
+        4. If no events found, return [].
+        5. If no specific 'kids' events found, include family-friendly programs.
+        6. TARGET: Only include events for children (0-12), teens, or families.
+        7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
+        8. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
+        9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Use 'All' ONLY if the event is system-wide. Do not omit the branch name. If the text says 'In Store [Location]', use that location.
+        10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
+        11. Extract as many events as possible (up to 30). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object.
+        12. Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "price_text", "snippet", "found_location"].
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
         """
         
