@@ -521,9 +521,9 @@ def run_scraper():
         browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
         DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
-        #for m in masters:
+        for m in masters:
             # Mark as scraped immediately
-         #   supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
+            # supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
             
             # Fetch affiliated branches
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
