@@ -108,18 +108,25 @@ def is_valid_date(date_str):
     
     today = datetime.now().date()
     limit = today + timedelta(days=90)
-    
+
     try:
-        # fuzzy=True helps ignore "at 10:00 AM" or "Thursday" inside the string
-        parsed_date = parser.parse(date_str, fuzzy=True).date()
-        
-        # Validation: Must be today or in the next 90 days
+        # parser.parse defaults to the current year
+        parsed_date = parser.parse(date_str, fuzzy=True).date()     
+        # 1. Check if it's in the past
+        if parsed_date < today:
+            # Try adding a year (for the Dec -> Jan rollover)
+            future_check = parsed_date.replace(year=today.year + 1)      
+            # 2. Only accept the +1 year IF it falls within our 90-day window
+            if today <= future_check <= limit:
+                parsed_date = future_check
+            else:
+                # If it's still in the past or way too far in the future, it's junk
+                return None
+        # Final validation
         if today <= parsed_date <= limit:
-            return parsed_date.strftime('%Y-%m-%d')
-        
-        # If it's a "Past" date from a static site, we ignore it
+            return parsed_date.strftime('%Y-%m-%d')            
         return None
-    except (ValueError, TypeError, OverflowError):
+    except:
         return None
         
 # --- Business Logic & Saving ---
@@ -332,13 +339,16 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             "Upgrade-Insecure-Requests": "1"
         })
         try:
-            page.goto(url, wait_until="networkidle", timeout=90000)
+            page.goto(url, wait_until="load", timeout=60000)
+            page.wait_for_timeout(5000) 
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except:
+                print(f"   ⚠️ Network busy for {master['name']}, moving to scrape anyway.")
         except Exception as e:
-            # If networkidle fails (some sites keep "chatting" in the background),
-            # it will timeout. We catch that and proceed anyway.
-            print(f"   ⚠️ Networkidle timeout for {master['name']}, proceeding with current data.")
-        page.wait_for_timeout(5000)
-        
+            print(f"   ❌ Fatal navigation error for {master['name']}: {e}")
+            return # Exit this master if we can't even load the page
+      
         if mode == "specific" and zip_code:
             try:
                 search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
@@ -381,8 +391,9 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Use 'All' ONLY if the event is system-wide. Do not omit the branch name. If the text says 'In Store [Location]', use that location.
         10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
         11. Extract as many events as possible (up to 30). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object.
-        12. Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "price_text", "snippet", "found_location"].
+        12. Output JSON list with these EXACT keys: ["title", "event_date" (YYYY-MM-DD), "category_name", "price_text", "snippet", "found_location"].
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
+        IMPORTANT: Use the date format YYYY-MM-DD. If year is missing in text, assume {today.year}.
         """
         
         #all_text = [page.evaluate("document.body.innerText")]
@@ -470,7 +481,7 @@ def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code
         8. NO DATES IN SNIPPET: Do not repeat the date or time in the snippet field; use it only for the description of the experience.
 
         FORMAT: Return a JSON LIST of objects:
-        [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "..."}}]
+        [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "found_location": "..."}}]
         """
         
         events = generate_with_retry(prompt, extracted_text, master['name'])
@@ -510,9 +521,9 @@ def run_scraper():
         browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
         DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
-        for m in masters:
+        #for m in masters:
             # Mark as scraped immediately
-            supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
+         #   supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
             
             # Fetch affiliated branches
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
