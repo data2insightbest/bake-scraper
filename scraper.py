@@ -184,7 +184,7 @@ def save_events(events, target_branches, midnight, master, mode):
         for branch in target_branches:
             if len(target_branches) == 1:
                 should_save = True
-            else
+            else:
                 found_loc = (ev.get('found_location') or ev.get('found_at') or "all").lower()
                 branch_name = branch.get('name', '').lower()
                 # Remove special characters like & and - for better matching
