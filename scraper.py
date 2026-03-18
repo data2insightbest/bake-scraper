@@ -205,6 +205,8 @@ def save_events(events, target_branches, midnight, master, mode):
                 noise_pattern = r'library|branch|store|center|museum|[^a-z0-9]' 
                 clean_found = re.sub(noise_pattern, '', found_loc)
                 clean_branch = re.sub(noise_pattern, '', branch_name)
+                if not clean_branch: clean_branch = branch_name.lower().replace(' ', '')
+                if not clean_found: clean_found = found_loc.lower().replace(' ', '')
                 
                 # Matching logic:
                 # 1. AI specifically said 'all'
