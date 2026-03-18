@@ -168,8 +168,12 @@ def save_events(events, target_branches, midnight, master, mode):
             continue
         
         ev_dt = datetime.strptime(date_str, '%Y-%m-%d').date()
+        # --- IMPROVED HALLUCINATION FILTER ---
         if ev_dt == today:
-            continue 
+            # If the snippet is generic or too short, it's likely a hallucination
+            # Otherwise, if it's a detailed description, keep it!
+            if "special program" in snippet.lower() or len(snippet) < 22:
+                continue
         days_away = (ev_dt - today).days
         
         # --- YOUR 3 STRICT CATEGORIES ---
@@ -190,7 +194,7 @@ def save_events(events, target_branches, midnight, master, mode):
         # If Gemini quotes the prompt or returns a placeholder snippet
         if "featured exhibit" in snippet.lower() or len(snippet) < 15:
             snippet = f"Special program: {title} at {m_name}."
-    
+ 
         for branch in target_branches:
             if len(target_branches) == 1:
                 should_save = True
@@ -206,10 +210,10 @@ def save_events(events, target_branches, midnight, master, mode):
                 # 1. AI specifically said 'all'
                 # 2. AI provided no location (fallback to save)
                 # 3. The cleaned branch name matches the cleaned found location
-                is_all = "all" in clean_found
+                is_all_or_empty = "all" in clean_found or clean_found.strip() == ""
                 is_match = clean_branch != "" and (clean_branch in clean_found or clean_found in clean_branch) 
-                should_save = is_all or not ev.get('found_location') or is_match
-            
+                should_save = is_all_or_empty or not ev.get('found_location') or is_match
+            print(f"      🔎 Match Check: Found '{clean_found}' vs DB '{clean_branch}' -> Match: {should_save}")
             if not should_save:
                  continue # Skip this branch if it's not the right match
             entry = {
@@ -256,21 +260,26 @@ def generate_with_retry(prompt, text_content, context_name="General"):
                 continue
             res_text = response.text.strip()
             json_match = re.search(r'\[\s*\{.*\}\s*\]', res_text, re.DOTALL)
-            
+
             if json_match:
-                raw_json = json_match.group(0)
+                raw_json = json_match.group(0).strip()
                 try:
                     return json.loads(raw_json)
                 except json.JSONDecodeError:
-                    # REPAIR: Handle the common "cut off" issue
-                    if not raw_json.endswith(']'):
+                    print(f"   🔧 Attempting advanced repair for {context_name}...")
+                    # 1. Clean up trailing commas or half-written properties. This regex removes everything after the last completed '}' so we can close the list properly.
+                    clean_json = re.sub(r'\},[^\}]*$', '}', raw_json)    
+                    # 2. Try various closing combinations
+                    for fix in [']', '}]', '"}]', '"}]}']:
                         try:
-                            # Try adding just the bracket, or a brace and a bracket
-                            for fix in [']', '}]', '"}]']:
-                                try:
-                                    return json.loads(raw_json + fix)
-                                except: continue
-                        except: pass
+                            return json.loads(clean_json + fix)
+                        except:
+                            continue                   
+                    # 3. Last resort: If it's still failing, try the raw string with just a bracket
+                    try:
+                        return json.loads(raw_json + "]")
+                    except:
+                        pass
             
             # 2. FALLBACK: If regex missed it but it's wrapped in backticks
             clean_text = re.sub(r'```json\s*|```', '', res_text).strip()
@@ -284,13 +293,24 @@ def generate_with_retry(prompt, text_content, context_name="General"):
             return []
 
         except Exception as e:
-            if "429" in str(e):
-                wait_time = (attempt + 1) * 15
+            # 1. Handle Rate Limits (The 429 Error)
+            if "429" in str(e) or "rate limit" in str(e).lower():
+                wait_time = (attempt + 1) * 30  # Increased to 30s to be safer
                 print(f"   ⏳ Rate limited. Waiting {wait_time}s...")
                 time.sleep(wait_time)
+            
+            # 2. Handle Temporary AI "Hiccups" (500, 503 errors)
+            elif "500" in str(e) or "503" in str(e):
+                print(f"   ⚠️ AI Server busy. Retrying in 10s...")
+                time.sleep(10)
+                
+            # 3. Final Catch-All
             else:
-                print(f"   ⚠️ AI Error for {context_name}: {e}")
-                break 
+                print(f"   ❌ Fatal AI Error for {context_name}: {e}")
+                # Only break if we've tried at least twice
+                if attempt > 1:
+                    break
+                time.sleep(5)  
     return []
 
 def get_daily_batch(limit=24):
@@ -363,17 +383,30 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             # We scroll to the very bottom in small increments to trigger 'Lazy Loading' cards
             print(f"   🖱️ Scrolling {master['name']} to trigger lazy-load...")
             for _ in range(8):
-                page.evaluate("window.scrollBy(0, window.innerHeight)")
-                time.sleep(2) # Give the images/text time to 'pop' in
-            
+                page.mouse.wheel(0, 1500)
+                time.sleep(2.5) # Wait for the 'spinning wheel' to finish loading data
+            # --- ADD THE EXTRA STEP HERE ---
+            print(f"   🔘 Checking for 'Load More' buttons...")
+            try:
+                # This looks for buttons containing "Load More", "View More", etc.
+                load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more|see more", re.I))
+                if load_more.is_visible():
+                    load_more.click()
+                    print(f"   ✅ Clicked 'Load More' for {master['name']}")
+                    time.sleep(4) # Wait for the new content to pop in
+            except:
+                pass # No button found, which is fine          
             # 3. Buffer for any final background data
             time.sleep(5) 
-            page.screenshot(path=f"debug_{re.sub(r'\W+', '', master['name'])}.png")
-
+            page.screenshot(path=f"debug_{re.sub(r'\W+', '', master['name'])}.png")        
+        
         # 4. CAPTURE ALL DATA (Main + Iframes)
-        # By getting text AFTER the exhaustive scroll, we capture 'Featured' sections that were hidden
-        # NEW: Optimized clean capture
-        combined_text = get_clean_text(page)
+        # --- IMPROVED: Clean HTML to save tokens and prevent "0 events" ---
+        raw_html = page.content()
+        clean_html = re.sub(r'<(script|style|meta|link)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
+        combined_text = get_clean_text(page) # Assuming this function handles the text extraction
+        combined_text = combined_text[:30000]
+            
         # 5. The 90-Day Sliding Prompt
         # Force a shorter, stricter JSON structure to avoid "Delimiter" errors
         prompt = f"""
@@ -382,7 +415,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "..."}}]
         2. DATE RULE: You must find the specific date. If the text says 'Every Monday', calculate the next 3 Mondays starting after {today.strftime('%B %d, %Y')}. 
            IMPORTANT: If NO specific date is found, use 'UNKNOWN' for event_date. DO NOT use today's date ({today.strftime('%Y-%m-%d')}) as a fallback.
-        3. Snippet must be 1 sentence describing the activity.
+        3. Snippet must be 1 sentence describing the activity under 20 words.
         4. If no events found, return [].
         5. If no specific 'kids' events found, include family-friendly programs.
         6. TARGET: Only include events for children (0-12), teens, or families.
@@ -475,11 +508,11 @@ def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code
         2. Look for explicit dates (e.g., "March 25", "Saturday", "April").
         3. If an exhibit is 'New' or 'Featured' but has no specific date, use {today_str}.
         4. IGNORE: "Museum Hours", "Closed", "Incoming", "General Admission", "Daily".
-        5. SNIPPET: Must be a descriptive sentence about the event content.
+        5. SNIPPET: Must be a descriptive sentence about the event content under 20 words.
         6. THEME: Only include events relevant to kids, families, or parenting (e.g., workshops, festivals, storytimes).
         7. EXCLUDE TECH DEMOS: For tech-heavy places (like Apple), IGNORE generic product training like "Get Started", "Photo Walk", or "iPad Basics" UNLESS it is specifically labeled for Kids/Families.
         8. NO DATES IN SNIPPET: Do not repeat the date or time in the snippet field; use it only for the description of the experience.
-
+        9. LIMIT: Extract up to 30 events.
         FORMAT: Return a JSON LIST of objects:
         [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "found_location": "..."}}]
         """
