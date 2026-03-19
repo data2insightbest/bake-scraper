@@ -194,7 +194,7 @@ def save_events(events, target_branches, midnight, master, mode):
         # If Gemini quotes the prompt or returns a placeholder snippet
         if "featured exhibit" in snippet.lower() or len(snippet) < 15:
             snippet = f"Special program: {title} at {m_name}."
- 
+        
         for branch in target_branches:
             if len(target_branches) == 1:
                 should_save = True
@@ -205,8 +205,7 @@ def save_events(events, target_branches, midnight, master, mode):
                 noise_pattern = r'library|branch|store|center|museum|[^a-z0-9]' 
                 clean_found = re.sub(noise_pattern, '', found_loc)
                 clean_branch = re.sub(noise_pattern, '', branch_name)
-                if not clean_branch: clean_branch = branch_name.lower().replace(' ', '')
-                if not clean_found: clean_found = found_loc.lower().replace(' ', '')
+                if not clean_found: clean_found = "all"
                 
                 # Matching logic:
                 # 1. AI specifically said 'all'
@@ -214,7 +213,7 @@ def save_events(events, target_branches, midnight, master, mode):
                 # 3. The cleaned branch name matches the cleaned found location
                 is_all_or_empty = "all" in clean_found or clean_found.strip() == ""
                 is_match = clean_branch != "" and (clean_branch in clean_found or clean_found in clean_branch) 
-                should_save = is_all_or_empty or not ev.get('found_location') or is_match
+                should_save = is_all_or_empty or is_match
             print(f"      🔎 Match Check: Found '{clean_found}' vs DB '{clean_branch}' -> Match: {should_save}")
             if not should_save:
                  continue # Skip this branch if it's not the right match
@@ -249,51 +248,59 @@ def save_events(events, target_branches, midnight, master, mode):
 
 def generate_with_retry(prompt, text_content, context_name="General"):
     """Centralized AI call logic with linear backoff (12s/24s/36s)."""
-    for attempt in range(3):
+    for attempt in range(3):                
         try:
             time.sleep(3) 
             response = client.models.generate_content(
                 model='gemini-2.0-flash', 
-                contents=[prompt, text_content[:25000]]
+                contents=[prompt, text_content[:30000]]
             )
             # 1. Check if response has text at all
             if not response or not hasattr(response, 'text') or not response.text:
                 print(f"   ⚠️ AI returned empty response for {context_name}")
                 continue
             res_text = response.text.strip()
-            json_match = re.search(r'\[\s*\{.*\}\s*\]', res_text, re.DOTALL)
-
-            if json_match:
-                raw_json = json_match.group(0).strip()
+            start_idx = res_text.find('[')
+            end_idx = res_text.rfind(']') + 1
+            
+            if start_idx != -1 and end_idx > start_idx:
+                raw_json = res_text[start_idx:end_idx].strip()
                 try:
                     return json.loads(raw_json)
                 except json.JSONDecodeError:
-                    print(f"   🔧 Attempting advanced repair for {context_name}...")
-                    # 1. Clean up trailing commas or half-written properties. This regex removes everything after the last completed '}' so we can close the list properly.
+                    print(f"    🔧 Attempting advanced repair for {context_name}...")
+                    
+                    # Clean up trailing commas or half-written properties
+                    # This removes trailing garbage before the last '}'
                     clean_json = re.sub(r'\},[^\}]*$', '}', raw_json)    
-                    # 2. Try various closing combinations
+                    
+                    # Try various closing combinations
                     for fix in [']', '}]', '"}]', '"}]}']:
                         try:
                             return json.loads(clean_json + fix)
                         except:
-                            continue                   
-                    # 3. Last resort: If it's still failing, try the raw string with just a bracket
-                    try:
-                        return json.loads(raw_json + "]")
-                    except:
-                        pass
-            
-            # 2. FALLBACK: If regex missed it but it's wrapped in backticks
-            clean_text = re.sub(r'```json\s*|```', '', res_text).strip()
+                            continue  
+            # --- LAYER 2: MARKDOWN BLOCK EXTRACTION (Fallback) ---
+            blocks = re.findall(r'[`]{3}(?:json)?\s*(.*?)\s*[`]{3}', res_text, re.DOTALL)
+            for block in blocks:
+                try:
+                    # Attempt to parse each individual block found
+                    return json.loads(block.strip())
+                except:
+                    # If this block isn't valid JSON, skip to the next one
+                    continue
+            # --- LAYER 3: AGGRESSIVE RAW STRIP (Last Resort) ---
+            # If no blocks worked, remove markers and try the whole string.
+            # This is the final safety net for "messy" AI responses.
+            final_attempt = re.sub(r'```json\s*|```', '', res_text).strip()
             try:
-                return json.loads(clean_text)
+                return json.loads(final_attempt)
             except:
                 pass
 
-            # DEBUG: Only print this if all parsing attempts failed
-            print(f"   ⚠️ AI gave non-JSON response for {context_name}: {res_text[:60]}...")
-            return []
-
+            # DEBUG: Only triggered if all 3 layers above failed to produce valid JSON
+            print(f"    ⚠️ AI gave non-JSON response for {context_name}: {res_text[:100]}...")
+        
         except Exception as e:
             # 1. Handle Rate Limits (The 429 Error)
             if "429" in str(e) or "rate limit" in str(e).lower():
