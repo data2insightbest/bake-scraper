@@ -246,80 +246,96 @@ def save_events(events, target_branches, midnight, master, mode):
             except Exception as e: 
                 print(f"      ⚠️ Database error: {e}")
 
+
+import time
+import json
+import re
 def generate_with_retry(prompt, text_content, context_name="General"):
-    """Centralized AI call logic with linear backoff (12s/24s/36s)."""
+    """
+    Complete AI response handler. 
+    Combines your original trailing-comma fix with a new salvage step 
+    to handle truncated text (e.g., 'Welcome spr...').
+    """
     for attempt in range(3):                
         try:
-            time.sleep(3) 
+            # Linear backoff to respect API limits
+            time.sleep(2 + attempt) 
+            
             response = client.models.generate_content(
                 model='gemini-2.0-flash', 
                 contents=[prompt, text_content[:30000]]
             )
-            # 1. Check if response has text at all
+            
             if not response or not hasattr(response, 'text') or not response.text:
-                print(f"   ⚠️ AI returned empty response for {context_name}")
+                print(f"    ⚠️ AI returned empty for {context_name}")
                 continue
+                
             res_text = response.text.strip()
+
+            # --- LAYER 1: POSITIONAL EXTRACTION & TRUNCATION SALVAGE ---
             start_idx = res_text.find('[')
             end_idx = res_text.rfind(']') + 1
             
-            if start_idx != -1 and end_idx > start_idx:
-                raw_json = res_text[start_idx:end_idx].strip()
+            if start_idx != -1:
+                # If no closing bracket found, take everything from the start to end of string
+                raw_json = res_text[start_idx:end_idx] if end_idx > start_idx else res_text[start_idx:]
+                
                 try:
+                    # 1. Try standard parse
                     return json.loads(raw_json)
                 except json.JSONDecodeError:
                     print(f"    🔧 Attempting advanced repair for {context_name}...")
                     
-                    # Clean up trailing commas or half-written properties
-                    # This removes trailing garbage before the last '}'
+                    # 2. EMERGENCY SALVAGE: Find the last completed event '}'
+                    # This recovers events if the AI cut off mid-sentence (e.g. "Welcome spr...")
+                    last_brace = raw_json.rfind('}')
+                    if last_brace != -1:
+                        salvaged_json = raw_json[:last_brace + 1]
+                        try:
+                            # Try closing the array right after the last good object
+                            return json.loads(salvaged_json + "]")
+                        except:
+                            pass
+                    
+                    # 3. YOUR ORIGINAL REPAIR LOGIC: Clean up trailing commas/half-written properties
                     clean_json = re.sub(r'\},[^\}]*$', '}', raw_json)    
                     
-                    # Try various closing combinations
+                    # 4. Try your original common closing sequences
                     for fix in [']', '}]', '"}]', '"}]}']:
                         try:
                             return json.loads(clean_json + fix)
                         except:
-                            continue  
+                            continue
+
             # --- LAYER 2: MARKDOWN BLOCK EXTRACTION (Fallback) ---
+            # Finds content inside ```json ... ``` using safe bracket notation
             blocks = re.findall(r'[`]{3}(?:json)?\s*(.*?)\s*[`]{3}', res_text, re.DOTALL)
             for block in blocks:
                 try:
-                    # Attempt to parse each individual block found
                     return json.loads(block.strip())
                 except:
-                    # If this block isn't valid JSON, skip to the next one
                     continue
+
             # --- LAYER 3: AGGRESSIVE RAW STRIP (Last Resort) ---
-            # If no blocks worked, remove markers and try the whole string.
-            # This is the final safety net for "messy" AI responses.
-            final_attempt = re.sub(r'```json\s*|```', '', res_text).strip()
+            # Removes backticks and tries to parse the whole string
+            final_attempt = re.sub(r'[`]{3}json\s*|[`]{3}', '', res_text).strip()
             try:
                 return json.loads(final_attempt)
             except:
                 pass
 
-            # DEBUG: Only triggered if all 3 layers above failed to produce valid JSON
-            print(f"    ⚠️ AI gave non-JSON response for {context_name}: {res_text[:100]}...")
+            print(f"    ⚠️ All extraction layers failed for {context_name}")
         
         except Exception as e:
-            # 1. Handle Rate Limits (The 429 Error)
-            if "429" in str(e) or "rate limit" in str(e).lower():
-                wait_time = (attempt + 1) * 30  # Increased to 30s to be safer
-                print(f"   ⏳ Rate limited. Waiting {wait_time}s...")
-                time.sleep(wait_time)
-            
-            # 2. Handle Temporary AI "Hiccups" (500, 503 errors)
-            elif "500" in str(e) or "503" in str(e):
-                print(f"   ⚠️ AI Server busy. Retrying in 10s...")
-                time.sleep(10)
-                
-            # 3. Final Catch-All
+            err_msg = str(e).lower()
+            if "429" in err_msg:
+                wait = (attempt + 1) * 30
+                print(f"    ⏳ Rate limited. Sleeping {wait}s...")
+                time.sleep(wait)
             else:
-                print(f"   ❌ Fatal AI Error for {context_name}: {e}")
-                # Only break if we've tried at least twice
-                if attempt > 1:
-                    break
-                time.sleep(5)  
+                print(f"    ❌ AI Error for {context_name}: {e}")
+                time.sleep(5)
+
     return []
 
 def get_daily_batch(limit=24):
@@ -471,16 +487,20 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
 import random
 def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code=None):
-    page = context.new_page()
-    url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
-    
-    # --- DYNAMIC DATE CALCULATIONS ---
-    now = datetime.now()
-    today_str = now.strftime('%Y-%m-%d')
-    # Calculate 90 days from whatever today happens to be
-    ninety_days_out = (now + timedelta(days=90)).strftime('%Y-%m-%d')
+    # --- 1. INITIALIZE IMMEDIATELY ---
+    # This is the most important line. It prevents the 'unbound' crash.
+    clean_events = [] 
+    page = None
     
     try:
+        page = context.new_page()
+        url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
+        
+        # --- 2. DYNAMIC DATE CALCULATIONS ---
+        now = datetime.now()
+        today_str = now.strftime('%Y-%m-%d')
+        ninety_days_out = (now + timedelta(days=90)).strftime('%Y-%m-%d')
+        
         print(f"📡 Scoping: {master['name']} (Today: {today_str})")
         
         # 🛡️ Universal Stealth Headers
@@ -489,25 +509,24 @@ def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code
             "Referer": "https://www.google.com/"
         })
 
-        # Navigate - use 'load' state to ensure scripts run
+        # Navigate
         page.goto(url, wait_until="load", timeout=60000)
         time.sleep(2) 
 
-        # 🖱️ Human-like scroll to trigger lazy-loaded calendars (IDs 2, 3, 4)
+        # 🖱️ Human-like scroll
         for _ in range(4):
             page.evaluate("window.scrollBy(0, 600)")
             time.sleep(random.uniform(1.0, 1.8))
 
-        # 🧩 Extraction: Capture text and ARIA labels (where dates often hide)
+        # 🧩 Extraction
         extracted_text = page.evaluate("""() => {
             const root = document.querySelector('main') || document.body;
             let data = root.innerText;
-            // Add aria-labels for accessibility-heavy sites like Exploratorium
             root.querySelectorAll('[aria-label]').forEach(el => data += " " + el.getAttribute('aria-label'));
             return data.replace(/\\s+/g, ' ').substring(0, 18000); 
         }""")
 
-        # 🧠 THE DYNAMIC PROMPT: No hard-coded dates
+        # 🧠 THE DYNAMIC PROMPT
         prompt = f"""
         Extract ONLY family-friendly special events or exhibits at {master['name']}.
         TODAY'S DATE: {today_str}.
@@ -518,25 +537,34 @@ def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code
         3. If an exhibit is 'New' or 'Featured' but has no specific date, use {today_str}.
         4. IGNORE: "Museum Hours", "Closed", "Incoming", "General Admission", "Daily".
         5. SNIPPET: Must be a descriptive sentence about the event content under 20 words.
-        6. THEME: Only include events relevant to kids, families, or parenting (e.g., workshops, festivals, storytimes).
-        7. EXCLUDE TECH DEMOS: For tech-heavy places (like Apple), IGNORE generic product training like "Get Started", "Photo Walk", or "iPad Basics" UNLESS it is specifically labeled for Kids/Families.
-        8. NO DATES IN SNIPPET: Do not repeat the date or time in the snippet field; use it only for the description of the experience.
+        6. THEME: Only include events relevant to kids, families, or parenting.
+        7. EXCLUDE TECH DEMOS: IGNORE generic product training unless specifically for Kids/Families.
+        8. NO DATES IN SNIPPET: Use snippet only for the description.
         9. LIMIT: Extract up to 30 events.
         FORMAT: Return a JSON LIST of objects:
-        [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "found_location": "..."}}]
+        [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "price_text": "...", "found_location": "..."}}]
         """
         
-        events = generate_with_retry(prompt, extracted_text, master['name'])
-        save_events(events or [], target_branches, midnight, master, mode)
+        # --- 3. CALL AI ---
+        # We assign the result to the variable we defined at the top
+        clean_events = generate_with_retry(prompt, extracted_text, master['name'])
+        
+        # --- 4. SAVE ---
+        save_events(clean_events or [], target_branches, midnight, master, mode)
             
     except Exception as e:
-        print(f"   ❌ Error Scoping ID {master['id']}: {e}")
-        # Ensure timestamp updates even on failure
+        print(f"    ❌ Error Scoping ID {master['id']}: {e}")
+        # Mark as attempted in database even if it failed
         try:
             supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", master['id']).execute()
-        except: pass
+        except: 
+            pass
     finally:
-        page.close()
+        # --- 5. CLEANUP ---
+        if page:
+            page.close()
+            
+    return clean_events
 
 def run_gemini_discovery(midnight):
     today = datetime.now()
