@@ -141,32 +141,38 @@ def save_events(events, target_branches, midnight, master, mode):
     except: pass
 
     if not events:
+        print(f"    ℹ️ No new events found for {m_name}. Keeping existing records.")
         return
         
     # Delete existing data for the 90-day future window for these specific branches
     branch_ids = [b['id'] for b in target_branches]
     limit_date = today + timedelta(days=90)
     if branch_ids:
-        supabase.table("events").delete() \
-            .in_("place_id", branch_ids) \
-            .gte("event_date", today.isoformat()) \
-            .lte("event_date", limit_date.isoformat()) \
-            .execute()
+        print(f"    🧹 Refreshing 90-day window for {len(branch_ids)} branches of {m_name}...")
+        try:
+            # Wrapped in try/except to prevent network timeouts from killing the whole script
+            supabase.table("events").delete() \
+                .in_("place_id", branch_ids) \
+                .gte("event_date", today.isoformat()) \
+                .lte("event_date", limit_date.isoformat()) \
+                .execute()
+        except Exception as e:
+            print(f"    ⚠️ Cleanup error (skipping delete): {e}")
 
     for ev in events:
-        # Normalize AI output (List vs Dict)
         if isinstance(ev, list):
             title, r_date, snippet = ev[0], ev[1], ev[2]
+            found_loc = "all"
         else:
             title = ev.get('title', 'Special Event')
             r_date = ev.get('event_date', 'UNKNOWN')
             snippet = ev.get('snippet', '')
+            found_loc = (ev.get('found_location') or ev.get('found_at') or "all").lower()
 
-        # Use our improved is_valid_date (no hard-coded 2024)
+        # Use our improved is_valid_date (no hard-coded 2024)        
         date_str = is_valid_date(r_date)
         if not date_str or r_date == 'UNKNOWN': 
-            continue
-        
+            continue        
         ev_dt = datetime.strptime(date_str, '%Y-%m-%d').date()
         # --- IMPROVED HALLUCINATION FILTER ---
         if ev_dt == today:
@@ -194,58 +200,49 @@ def save_events(events, target_branches, midnight, master, mode):
         # If Gemini quotes the prompt or returns a placeholder snippet
         if "featured exhibit" in snippet.lower() or len(snippet) < 15:
             snippet = f"Special program: {title} at {m_name}."
-        
+
         for branch in target_branches:
+            should_save = False
             if len(target_branches) == 1:
                 should_save = True
             else:
-                found_loc = (ev.get('found_location') or ev.get('found_at') or "all").lower()
-                branch_name = branch.get('name', '').lower()
-                # Remove special characters like & and - for better matching
+                # IMPROVED MATCHING: 
+                # Museums often have names like "California Academy of Sciences" 
+                # but AI might just return "Academy of Sciences". 
                 noise_pattern = r'library|branch|store|center|museum|[^a-z0-9]' 
                 clean_found = re.sub(noise_pattern, '', found_loc)
-                clean_branch = re.sub(noise_pattern, '', branch_name)
-                if not clean_found: clean_found = "all"
+                clean_branch = re.sub(noise_pattern, '', branch.get('name', '').lower())
                 
-                # Matching logic:
-                # 1. AI specifically said 'all'
-                # 2. AI provided no location (fallback to save)
-                # 3. The cleaned branch name matches the cleaned found location
-                is_all_or_empty = "all" in clean_found or clean_found.strip() == ""
-                is_match = clean_branch != "" and (clean_branch in clean_found or clean_found in clean_branch) 
-                should_save = is_all_or_empty or is_match
-            print(f"      🔎 Match Check: Found '{clean_found}' vs DB '{clean_branch}' -> Match: {should_save}")
-            if not should_save:
-                 continue # Skip this branch if it's not the right match
-            entry = {
-                'place_id': branch['id'],
-                'place_name': branch.get('name', m_name),
-                'title': title,
-                'event_date': date_str,
-                'snippet': snippet,
-                'category_name': master.get('category_name') or master.get('category') or 'Special Activity',
-                'zip_code': branch.get('zip_code'),
-                'window_type': window,
-                'specificity_score': 10 if "exhibit" in title_low else 7
-            }
-            
-            
-            try:
-                # Check for existing duplicate before inserting
-                existing = supabase.table("events").select("id") \
-                    .eq("place_id", branch['id']) \
-                    .eq("title", title) \
-                    .eq("event_date", date_str) \
-                    .execute()
-                
-                if not existing.data:
-                    supabase.table("events").insert(entry).execute()
-                else:
-                    # Optional: print(f"      ⏭️ Skipping duplicate: {title}")
-                    pass
-            except Exception as e: 
-                print(f"      ⚠️ Database error: {e}")
+                if not clean_found or "all" in clean_found:
+                    should_save = True
+                elif clean_branch and (clean_branch in clean_found or clean_found in clean_branch):
+                    should_save = True
 
+            if should_save:
+                entry = {
+                    'place_id': branch['id'],
+                    'place_name': branch.get('name', m_name),
+                    'title': title,
+                    'event_date': date_str,
+                    'snippet': snippet,
+                    'category_name': master.get('category_name') or master.get('category') or 'Special Activity',
+                    'zip_code': branch.get('zip_code'),
+                    'window_type': window,
+                    'specificity_score': 10 if "exhibit" in title_low else 7
+                }
+                
+                try:
+                    # Final Duplicate Check to prevent double-entries
+                    existing = supabase.table("events").select("id") \
+                        .eq("place_id", branch['id']) \
+                        .eq("title", title) \
+                        .eq("event_date", date_str) \
+                        .execute()
+                    
+                    if not existing.data:
+                        supabase.table("events").insert(entry).execute()
+                except Exception as e: 
+                    print(f"      ⚠️ Database insert error: {e}")
 
 import time
 import json
