@@ -160,7 +160,13 @@ def save_events(events, target_branches, midnight, master, mode):
                 .execute()
         except Exception as e:
             print(f"    ⚠️ Cleanup error (skipping delete): {e}")
-
+    # --- FLEXIBLE SCORING MAP ---
+    # Centralized weights for easy updates - No longer hardcoded in IF statements
+    score_weights = {
+        10: ["festival", "fair", "exhibit", "performance", "concert", "parade", "celebration"],
+        8: ["storytime", "lego", "maker", "craft", "lab", "workshop", "play", "animation", "science"],
+        4: ["homework", "tutoring", "assistance", "esl", "citizenship", "help"]
+    } 
     for ev in events:
         if isinstance(ev, list):
             title, r_date, snippet = ev[0], ev[1], ev[2]
@@ -203,14 +209,11 @@ def save_events(events, target_branches, midnight, master, mode):
         if "featured exhibit" in snippet.lower() or len(snippet) < 15:
             snippet = f"Special program: {title} at {m_name}."
 
-        if any(w in title_low for w in ["exhibit", "festival", "performance", "concert", "fair"]):
-            spec_score = 10
-        elif any(w in title_low for w in ["workshop", "class", "storytime", "lab", "maker", "lego"]):
-            spec_score = 8
-        elif any(w in title_low for w in ["assistance", "homework", "tutoring"]):
-            spec_score = 4
-        else:
-            spec_score = 7
+        spec_score = 7 # Default base score
+        for weight, keywords in score_weights.items():
+            if any(k in title_low for k in keywords):
+                spec_score = weight
+                break
         # --- NEW: SEARCH BLOB FOR ACCURATE MAPPING ---
         # Search title, snippet, and location field for branch keywords
         search_blob = f"{title_low} {snippet.lower()} {found_loc}"
@@ -226,15 +229,19 @@ def save_events(events, target_branches, midnight, master, mode):
                 branch_name_full = branch.get('name', '').lower()
                 clean_identity = re.sub(noise_pattern, '', branch_name_full).strip()
                 
-                # Rule 1: Direct name match in the event text
+                # Rule 1: Specific identity exists in the text blob
                 if clean_identity and clean_identity in search_blob:
                     should_save = True
-                # Rule 2: Generic 'all' logic (Blocked for Homework Help)
-                elif not found_loc or "all" in found_loc:
-                    if spec_score == 4: # If it's Homework/Service, require an identity match
-                        should_save = False
-                    else:
+                
+                # Rule 2: Handle 'all' or 'system-wide' keywords
+                # Only allow broad saving if the event is a high-value "Festival/Exhibit" (Score 10)
+                elif any(x in found_loc for x in ["all", "system", "multiple", "various"]):
+                    if spec_score >= 10:
                         should_save = True
+                    else:
+                        # Block routine events (Storytime/Homework) from mapping to all locations
+                        should_save = False
+                
                 # Rule 3: Direct location match
                 elif clean_identity in found_loc or found_loc in clean_identity:
                     should_save = True
@@ -449,13 +456,13 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         clean_html = re.sub(r'<(script|style|meta|link)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
         combined_text = get_clean_text(page) # Assuming this function handles the text extraction
         combined_text = combined_text[:30000]
-            
+
         # 5. The 90-Day Sliding Prompt
         # Force a shorter, stricter JSON structure to avoid "Delimiter" errors
         prompt = f"""
         Extract events at {master['name']} from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
         Rules:
-        1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "..."}}]
+        1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "..."}}]. No intro text, no markdown backticks, and no summary at the end.
         2. DATE RULE: You must find the specific date. If the text says 'Every Monday', calculate the next 3 Mondays starting after {today.strftime('%B %d, %Y')}. 
            IMPORTANT: If NO specific date is found, use 'UNKNOWN' for event_date. DO NOT use today's date ({today.strftime('%Y-%m-%d')}) as a fallback.
         3. Snippet must be 1 sentence describing the activity under 20 words.
@@ -464,14 +471,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         6. TARGET: Only include events for children (0-12), teens, or families.
         7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
         8. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
-        9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Use 'All' ONLY if the event is system-wide. Do not omit the branch name. If the text says 'In Store [Location]', use that location. NO SUMMARIES: Do not combine events from different branches into a single "All Locations" entry. If the same activity happens at different branches, return exact the same number of separate JSON objects. LOCATION EXTRACTION: Check descriptions and metadata carefully for branch names. If it says "System-wide", look for a list of participating locations.
+        9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Do not omit the branch name. If the text says 'In Store [Location]', use that location. NO SUMMARIES: Do not combine events from different branches into a single "All Locations" entry. If the same activity happens at different branches, return exact the same number of separate JSON objects. LOCATION EXTRACTION: Check descriptions and metadata carefully for branch names. NEVER use 'All Locations', 'System-wide', or 'Multiple'. If a specific branch name is not found in the text, skip the event. 'found_location' must contain ONLY the specific branch name (e.g., 'Castro Valley').
         10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
-        11. Extract as many events as possible (up to 30). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object.
-        12. Output JSON list with these EXACT keys: ["title", "event_date" (YYYY-MM-DD), "category_name", "price_text", "snippet", "found_location"].
+        11. Extract as many events as possible (up to 25). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object. If you reach your token limit, STOP and close the JSON array `]` properly. Never leave a JSON object hanging open.
+        12. Output JSON list with these EXACT keys: ["title", "event_date" (YYYY-MM-DD), "snippet", "found_location"].
+        13. CONTEXT: If the text looks like a list of store names without times, ignore them. Only extract items that have a TITLE and a specific DATE.
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
         IMPORTANT: Use the date format YYYY-MM-DD. If year is missing in text, assume {today.year}.
-        """
-        
+            
         #all_text = [page.evaluate("document.body.innerText")]
         #for frame in page.frames:
         #    try:
