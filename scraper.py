@@ -130,6 +130,8 @@ def is_valid_date(date_str):
         return None
         
 # --- Business Logic & Saving ---
+import re
+from datetime import datetime, timedelta
 def save_events(events, target_branches, midnight, master, mode):
     m_id = master['id']
     m_name = master.get('name', 'Unknown')
@@ -143,7 +145,7 @@ def save_events(events, target_branches, midnight, master, mode):
     if not events:
         print(f"    ℹ️ No new events found for {m_name}. Keeping existing records.")
         return
-        
+
     # Delete existing data for the 90-day future window for these specific branches
     branch_ids = [b['id'] for b in target_branches]
     limit_date = today + timedelta(days=90)
@@ -201,21 +203,40 @@ def save_events(events, target_branches, midnight, master, mode):
         if "featured exhibit" in snippet.lower() or len(snippet) < 15:
             snippet = f"Special program: {title} at {m_name}."
 
+        if any(w in title_low for w in ["exhibit", "festival", "performance", "concert", "fair"]):
+            spec_score = 10
+        elif any(w in title_low for w in ["workshop", "class", "storytime", "lab", "maker", "lego"]):
+            spec_score = 8
+        elif any(w in title_low for w in ["assistance", "homework", "tutoring"]):
+            spec_score = 4
+        else:
+            spec_score = 7
+        # --- NEW: SEARCH BLOB FOR ACCURATE MAPPING ---
+        # Search title, snippet, and location field for branch keywords
+        search_blob = f"{title_low} {snippet.lower()} {found_loc}"
+        
         for branch in target_branches:
             should_save = False
             if len(target_branches) == 1:
                 should_save = True
             else:
-                # IMPROVED MATCHING: 
-                # Museums often have names like "California Academy of Sciences" 
-                # but AI might just return "Academy of Sciences". 
-                noise_pattern = r'library|branch|store|center|museum|[^a-z0-9]' 
-                clean_found = re.sub(noise_pattern, '', found_loc)
-                clean_branch = re.sub(noise_pattern, '', branch.get('name', '').lower())
+                # --- NEW: IDENTITY MATCHING ---
+                # Find unique name (e.g. 'fremont') from 'Fremont Main Library'
+                noise_pattern = r'library|branch|store|center|museum|[^a-z0-9\s]'
+                branch_name_full = branch.get('name', '').lower()
+                clean_identity = re.sub(noise_pattern, '', branch_name_full).strip()
                 
-                if not clean_found or "all" in clean_found:
+                # Rule 1: Direct name match in the event text
+                if clean_identity and clean_identity in search_blob:
                     should_save = True
-                elif clean_branch and (clean_branch in clean_found or clean_found in clean_branch):
+                # Rule 2: Generic 'all' logic (Blocked for Homework Help)
+                elif not found_loc or "all" in found_loc:
+                    if spec_score == 4: # If it's Homework/Service, require an identity match
+                        should_save = False
+                    else:
+                        should_save = True
+                # Rule 3: Direct location match
+                elif clean_identity in found_loc or found_loc in clean_identity:
                     should_save = True
 
             if should_save:
