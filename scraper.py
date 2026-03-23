@@ -137,13 +137,14 @@ def save_events(events, target_branches, midnight, master, mode):
     m_name = master.get('name', 'Unknown')
     today = datetime.now().date()
     
-    # ALWAYS Update timestamp immediately
+    # 1. ALWAYS Update heartbeat timestamp
     try:
         supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m_id).execute()
-    except: pass
+    except Exception as e:
+        print(f"    ⚠️ Heartbeat update failed: {e}")
 
     if not events:
-        print(f"    ℹ️ No new events found for {m_name}. Keeping existing records.")
+        print(f"    ℹ️ No events extracted for {m_name}. Skipping save.")
         return
 
     # Delete existing data for the 90-day future window for these specific branches
@@ -167,6 +168,15 @@ def save_events(events, target_branches, midnight, master, mode):
         8: ["storytime", "lego", "maker", "craft", "lab", "workshop", "play", "animation", "science"],
         4: ["homework", "tutoring", "assistance", "esl", "citizenship", "help"]
     } 
+    # 4. PRE-CLEAN Branch Identities for faster matching
+    noise_pattern = r'library|branch|store|center|museum|main|county|system|[^a-z0-9\s]'
+    processed_branches = []
+    for b in target_branches:
+        b_name = b.get('name', '').lower()
+        clean_id = re.sub(noise_pattern, '', b_name).strip()
+        processed_branches.append({**b, "clean_identity": clean_id})
+
+    saved_count = 0
     for ev in events:
         if isinstance(ev, list):
             title, r_date, snippet = ev[0], ev[1], ev[2]
@@ -180,8 +190,12 @@ def save_events(events, target_branches, midnight, master, mode):
         # Use our improved is_valid_date (no hard-coded 2024)        
         date_str = is_valid_date(r_date)
         if not date_str or r_date == 'UNKNOWN': 
-            continue        
-        ev_dt = datetime.strptime(date_str, '%Y-%m-%d').date()
+            continue   
+        try:
+            ev_dt = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except:
+            continue
+            
         # --- IMPROVED HALLUCINATION FILTER ---
         if ev_dt == today:
             # If the snippet is generic or too short, it's likely a hallucination
@@ -199,11 +213,25 @@ def save_events(events, target_branches, midnight, master, mode):
             window = "Special Scout"
         else:
             continue
-
+      
         # --- JUNK & HALLUCINATION CLEANUP ---
         title_low = title.lower()
-        if any(j in title_low for j in ["incoming", "hours", "schedule", "admission", "closed", "private", "get started", "basics", "iphone", "ipad", "mac", "skills", "photo walk", "video walk"]):
+        snippet_low = snippet.lower()
+         # 1. Skip AI Refusals / "No Internet" hallucinations
+        if any(h in title_low for h in ["unable to", "no internet", "access the internet", "no events found", "sorry"]):
             continue
+            
+        # 2. Skip Logistical/Commercial Junk (Restored from your previous version)
+        junk_keywords = [
+            "incoming", "hours", "schedule", "admission", "closed", "private", 
+            "get started", "basics", "iphone", "ipad", "mac", "skills", 
+            "photo walk", "video walk"
+        ]
+        if any(j in title_low for j in junk_keywords):
+            continue
+        # 90-day Limit Guard
+        if days_away < 0 or days_away > 90: 
+            continue 
             
         # If Gemini quotes the prompt or returns a placeholder snippet
         if "featured exhibit" in snippet.lower() or len(snippet) < 15:
@@ -393,8 +421,9 @@ def get_daily_batch(limit=24):
 def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code=None):
     page = context.new_page()
     page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}'
     
+    url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
+    m_name = master.get('name', 'Unknown')
     today = datetime.now()
     future_date = today + timedelta(days=90)
     range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
@@ -407,8 +436,9 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             "Referer": "https://www.google.com/",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Upgrade-Insecure-Requests": "1"
-        })
+        }) 
         try:
+            print(f"   🌐 Navigating to {m_name}...")
             page.goto(url, wait_until="load", timeout=60000)
             page.wait_for_timeout(5000) 
             try:
@@ -446,15 +476,43 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     time.sleep(4) # Wait for the new content to pop in
             except:
                 pass # No button found, which is fine          
-            # 3. Buffer for any final background data
-            time.sleep(5) 
-            page.screenshot(path=f"debug_{re.sub(r'\W+', '', master['name'])}.png")        
+        # 3. DEBUG & CAPTURE (Restoring Screenshot & Cleanup)
+        print(f"    📸 Capturing debug state and cleaning data...")
+        time.sleep(5) 
+        # Create a safe filename for the screenshot
+        safe_name = re.sub(r'\W+', '', m_name)
+        page.screenshot(path=f"debug_{safe_name}.png")      
+
+        # 4. CAPTURE & CLEAN DATA (Stealth + HTML Fallback)
+        print(f"    🧹 Cleaning HTML and extracting text...")
         
-        # 4. CAPTURE ALL DATA (Main + Iframes)
-        # --- IMPROVED: Clean HTML to save tokens and prevent "0 events" ---
+        # Get Raw and Clean HTML first as the broad safety net
         raw_html = page.content()
-        clean_html = re.sub(r'<(script|style|meta|link)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
-        combined_text = get_clean_text(page) # Assuming this function handles the text extraction
+        clean_html = re.sub(r'<(script|style|meta|link|svg|path|footer|nav)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
+        
+        # Stealth Extraction targets specific high-probability event cards
+        stealth_text = page.evaluate("""() => {
+            const selectors = ['.event-card', '.event-item', '.bn-events-container', '.library-event', '.card-content', '.event-list', '.tribe-events-calendar-list'];
+            let foundData = [];
+            for (const s of selectors) {
+                const items = document.querySelectorAll(s);
+                if (items.length > 0) {
+                    items.forEach(i => foundData.push(i.innerText));
+                }
+            }
+            return foundData.join('\\n---\\n');
+        }""")
+
+        # Combine: If stealth found data, use it. Otherwise, use the cleaned HTML text.
+        if stealth_text.strip():
+            combined_text = stealth_text
+        else:
+            # Simple text extraction from the cleaned HTML structure
+            combined_text = re.sub(r'<[^>]+>', ' ', clean_html)
+            combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+
+        # Final string safety and token limit management
+        combined_text = combined_text.replace('\\n', '\n').strip()
         combined_text = combined_text[:30000]
 
         # 5. The 90-Day Sliding Prompt
@@ -465,37 +523,21 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "..."}}]. No intro text, no markdown backticks, and no summary at the end.
         2. DATE RULE: You must find the specific date. If the text says 'Every Monday', calculate the next 3 Mondays starting after {today.strftime('%B %d, %Y')}. 
            IMPORTANT: If NO specific date is found, use 'UNKNOWN' for event_date. DO NOT use today's date ({today.strftime('%Y-%m-%d')}) as a fallback.
+           DATE EXPANSION: For recurring events like "Homework Help" or "Storytime" (e.g., 'Every Monday' or 'Mon-Thu'), you MUST generate a separate JSON object for EVERY SINGLE DATE for the next 90 days.
+           DO NOT summarize. I need individual entries to fill the calendar.
         3. Snippet must be 1 sentence describing the activity under 20 words.
         4. If no events found, return [].
         5. If no specific 'kids' events found, include family-friendly programs.
         6. TARGET: Only include events for children (0-12), teens, or families.
         7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
         8. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
-        9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Do not omit the branch name. If the text says 'In Store [Location]', use that location. NO SUMMARIES: Do not combine events from different branches into a single "All Locations" entry. If the same activity happens at different branches, return exact the same number of separate JSON objects. LOCATION EXTRACTION: Check descriptions and metadata carefully for branch names. NEVER use 'All Locations', 'System-wide', or 'Multiple'. If a specific branch name is not found in the text, skip the event. 'found_location' must contain ONLY the specific branch name (e.g., 'Castro Valley').
+        9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Do not omit the branch name. Search the entire text, including headers and descriptions. If the text says 'In Store [Location]', use that location. NO SUMMARIES: Do not combine events from different branches into a single "All Locations" entry. If the same activity happens at different branches, return exact the same number of separate JSON objects. LOCATION EXTRACTION: Check descriptions and metadata carefully for branch names. NEVER use 'All Locations', 'System-wide', or 'Multiple'. If a specific branch name is not found in the text, skip the event. 'found_location' must contain ONLY the specific branch name (e.g., 'Castro Valley').
         10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
         11. Extract as many events as possible (up to 25). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object. If you reach your token limit, STOP and close the JSON array `]` properly. Never leave a JSON object hanging open.
         12. Output JSON list with these EXACT keys: ["title", "event_date" (YYYY-MM-DD), "snippet", "found_location"].
         13. CONTEXT: If the text looks like a list of store names without times, ignore them. Only extract items that have a TITLE and a specific DATE.
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
         IMPORTANT: Use the date format YYYY-MM-DD. If year is missing in text, assume {today.year}.
-            
-        #all_text = [page.evaluate("document.body.innerText")]
-        #for frame in page.frames:
-        #    try:
-        #        f_text = frame.evaluate("document.body.innerText")
-        #        if len(f_text) > 50: all_text.append(f_text)
-        #    except: continue
-        #combined_text = "\n---\n".join(all_text)
-        # 5. The 90-Day Sliding Prompt
-        #prompt = f"""
-        #Today is {today.strftime('%B %d, %Y')}. 
-        #Find ALL upcoming public events, workshops, or special exhibits for {master['name']} between {range_str}.
-        #I need the 'New and Featured' events as well as recurring programs.
-        #Output JSON list: ["title", "event_date" (YYYY-MM-DD), "category_name", "window_type", "price_text", "snippet", "found_location"].
-        #Rules:
-        #1. Year must be 2026.
-        #2. If no specific 'kids' events found, include family-friendly programs.
-        #3. Return ONLY the JSON list []. If none, return [].
         
         events = generate_with_retry(prompt, combined_text, master['name'])
 
