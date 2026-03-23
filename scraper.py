@@ -538,7 +538,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         13. CONTEXT: If the text looks like a list of store names without times, ignore them. Only extract items that have a TITLE and a specific DATE.
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
         IMPORTANT: Use the date format YYYY-MM-DD. If year is missing in text, assume {today.year}.
-        
+        """
         events = generate_with_retry(prompt, combined_text, master['name'])
 
         if events:
