@@ -677,10 +677,14 @@ def run_scraper():
             category_low = category_raw.lower()
 
             # 1. HYBRID RETAIL (Home Depot/Lowes)
-            if any(x in name_low for x in ["home depot", "lowe's", "lowes"]):
+            is_hd = "home depot" in name_low
+            is_lowes = "lowe's" in name_low or "lowes" in name_low
+            if is_hd or is_lowes:
                 print(f"🛡️ Hybrid: {m['name']}")
+                # Pass the raw name to your existing working function
                 save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m, "global")
-
+                continue # Skip standard scraping
+    
             # 2. SPECIFIC BRANCH SCRAPING (Lego/Barnes/Slime)
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
                 print(f"🔍 Dynamic: {m['name']}")
