@@ -238,16 +238,19 @@ def save_events(events, target_branches, midnight, master, mode):
             snippet = f"Special program: {title} at {m_name}."
 
         # --- CALCULATE SCORE USING REGEX ---
-        # Normalize text by removing symbols like ® to ensure keywords match
-        clean_text_for_score = re.sub(r'[^a-z0-9\s]', '', f"{title_low} {snippet_low}")
-        spec_score = 7  # THE DEFAULT 
+        # 1. Normalize: strip symbols but keep spaces
+        clean_text_for_score = re.sub(r'[^a-z0-9\s]', ' ', f"{title_low} {snippet_low}")
+        # 2. Collapse multiple spaces into one to help regex matching
+        clean_text_for_score = " ".join(clean_text_for_score.split())    
+        spec_score = 7  # THE DEFAULT  
         for score_val, keywords in score_weights:
-            # \b ensures we match 'art' but not 'earth'
-            pattern = r'\b(' + '|'.join(keywords) + r')\b'
+            # We escape keywords just in case, and use a simpler boundary check
+            # This ensures "story time" (with a space) matches correctly
+            pattern = r'(^| )(' + '|'.join(map(re.escape, keywords)) + r')( |$)'     
             if re.search(pattern, clean_text_for_score):
                 spec_score = score_val
-                break 
-
+                break
+                
         # --- NEW: SEARCH BLOB FOR ACCURATE MAPPING ---
         # Search title, snippet, and location field for branch keywords
         search_blob = f"{title_low} {snippet.lower()} {found_loc}"
@@ -291,7 +294,7 @@ def save_events(events, target_branches, midnight, master, mode):
                     'category_name': master.get('category_name') or master.get('category') or 'Special Activity',
                     'zip_code': branch.get('zip_code'),
                     'window_type': window,
-                    'specificity_score': 10 if "exhibit" in title_low else 7
+                    'specificity_score': spec_score, # Make sure this isn't hardcoded to 7!
                 }
                 
                 try:
