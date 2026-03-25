@@ -255,7 +255,7 @@ def save_events(events, target_branches, midnight, master, mode):
         for branch in target_branches:
             should_save = False
             if len(target_branches) == 1:
-                should_save = True
+                should_save = True    
             else:
                 # --- NEW: IDENTITY MATCHING ---
                 # Find unique name (e.g. 'fremont') from 'Fremont Main Library'
@@ -266,14 +266,15 @@ def save_events(events, target_branches, midnight, master, mode):
                 # Rule 1: Specific identity exists in the text blob
                 if clean_identity and clean_identity in search_blob:
                     should_save = True
-                
-                # Rule 2: Handle 'all' or 'system-wide' keywords
-                # Only allow broad saving if the event is a high-value "Festival/Exhibit" (Score 10)
+
+                # Rule 2: Handle 'all' or 'system-wide' keywords (FIXED FOR HARDWARE)
                 elif any(x in found_loc for x in ["all", "system", "multiple", "various"]):
-                    if spec_score >= 10:
+                    # ALLOW Home Depot & Lowe's to save everything to 'all'
+                    is_hardware = any(h in m_name.lower() for h in ["home depot", "lowe"])   
+                    if is_hardware or spec_score >= 10:
                         should_save = True
                     else:
-                        # Block routine events (Storytime/Homework) from mapping to all locations
+                        # Keep blocking routine library events (Storytime/Homework) from 'all'
                         should_save = False
                 
                 # Rule 3: Direct location match
