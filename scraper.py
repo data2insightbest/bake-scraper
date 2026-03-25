@@ -237,14 +237,16 @@ def save_events(events, target_branches, midnight, master, mode):
         if "featured exhibit" in snippet.lower() or len(snippet) < 15:
             snippet = f"Special program: {title} at {m_name}."
 
-         # --- CALCULATE SCORE ---
-        # Combine title and snippet to catch more keywords
-        text_to_check = f"{title.lower()} {snippet.lower()}"
+        # --- CALCULATE SCORE USING REGEX ---
+        # Normalize text by removing symbols like ® to ensure keywords match
+        clean_text_for_score = re.sub(r'[^a-z0-9\s]', '', f"{title_low} {snippet_low}")
         spec_score = 7  # THE DEFAULT 
         for score_val, keywords in score_weights:
-            if any(k in text_to_check for k in keywords):
+            # \b ensures we match 'art' but not 'earth'
+            pattern = r'\b(' + '|'.join(keywords) + r')\b'
+            if re.search(pattern, clean_text_for_score):
                 spec_score = score_val
-                break # Exit loop once highest tier match is found
+                break 
 
         # --- NEW: SEARCH BLOB FOR ACCURATE MAPPING ---
         # Search title, snippet, and location field for branch keywords
