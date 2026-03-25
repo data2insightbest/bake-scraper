@@ -163,11 +163,11 @@ def save_events(events, target_branches, midnight, master, mode):
             print(f"    ⚠️ Cleanup error (skipping delete): {e}")
     # --- FLEXIBLE SCORING MAP ---
     # Centralized weights for easy updates - No longer hardcoded in IF statements
-    score_weights = {
-        10: ["festival", "fair", "exhibit", "performance", "concert", "parade", "celebration"],
-        8: ["storytime", "lego", "maker", "craft", "lab", "workshop", "play", "animation", "science"],
-        4: ["homework", "tutoring", "assistance", "esl", "citizenship", "help"]
-    } 
+    score_weights = [
+        (10, ["festival", "fair", "exhibit", "performance", "concert", "parade", "celebration", "expo", "theater", "carnival", "show"]),
+        (8, ["storytime", "story time", "lego", "maker", "craft", "lab", "workshop", "play", "science", "art", "steam", "stem", "construction", "diy", "paint", "build"]),
+        (4, ["homework", "tutoring", "assistance", "esl", "citizenship", "help", "study", "exam", "test prep", "literacy", "reading buddies"])
+    ]
     # 4. PRE-CLEAN Branch Identities for faster matching
     noise_pattern = r'library|branch|store|center|museum|main|county|system|[^a-z0-9\s]'
     processed_branches = []
@@ -237,11 +237,15 @@ def save_events(events, target_branches, midnight, master, mode):
         if "featured exhibit" in snippet.lower() or len(snippet) < 15:
             snippet = f"Special program: {title} at {m_name}."
 
-        spec_score = 7 # Default base score
-        for weight, keywords in score_weights.items():
-            if any(k in title_low for k in keywords):
-                spec_score = weight
-                break
+         # --- CALCULATE SCORE ---
+        # Combine title and snippet to catch more keywords
+        text_to_check = f"{title.lower()} {snippet.lower()}"
+        spec_score = 7  # THE DEFAULT 
+        for score_val, keywords in score_weights:
+            if any(k in text_to_check for k in keywords):
+                spec_score = score_val
+                break # Exit loop once highest tier match is found
+
         # --- NEW: SEARCH BLOB FOR ACCURATE MAPPING ---
         # Search title, snippet, and location field for branch keywords
         search_blob = f"{title_low} {snippet.lower()} {found_loc}"
@@ -463,19 +467,22 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             # We scroll to the very bottom in small increments to trigger 'Lazy Loading' cards
             print(f"   🖱️ Scrolling {master['name']} to trigger lazy-load...")
             for _ in range(8):
-                page.mouse.wheel(0, 1500)
+                page.mouse.wheel(0, 2000)
                 time.sleep(2.5) # Wait for the 'spinning wheel' to finish loading data
             # --- ADD THE EXTRA STEP HERE ---
             print(f"   🔘 Checking for 'Load More' buttons...")
-            try:
+            for i in range(5):
+                try:
                 # This looks for buttons containing "Load More", "View More", etc.
-                load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more|see more", re.I))
-                if load_more.is_visible():
-                    load_more.click()
-                    print(f"   ✅ Clicked 'Load More' for {master['name']}")
-                    time.sleep(4) # Wait for the new content to pop in
-            except:
-                pass # No button found, which is fine          
+                    load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more|see more", re.I))
+                    if load_more.is_visible():
+                        load_more.click()
+                        print(f"   ✅ Clicked 'Load More' for {master['name']}")
+                        time.sleep(4) # Wait for the new content to pop in
+                    else: 
+                        break
+                except:
+                    break # No button found, which is fine          
         # 3. DEBUG & CAPTURE (Restoring Screenshot & Cleanup)
         print(f"    📸 Capturing debug state and cleaning data...")
         time.sleep(5) 
@@ -513,7 +520,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
         # Final string safety and token limit management
         combined_text = combined_text.replace('\\n', '\n').strip()
-        combined_text = combined_text[:30000]
+        combined_text = combined_text[:35000]
 
         # 5. The 90-Day Sliding Prompt
         # Force a shorter, stricter JSON structure to avoid "Delimiter" errors
@@ -527,8 +534,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
            DO NOT summarize. I need individual entries to fill the calendar.
         3. Snippet must be 1 sentence describing the activity under 20 words.
         4. If no events found, return [].
-        5. If no specific 'kids' events found, include family-friendly programs.
-        6. TARGET: Only include events for children (0-12), teens, or families.
+        5. IDENTIFY AGE GROUP: Look for tags like 'Teens (12-18)', 'Children (6-11)', 'Preschoolers (0-5)', 'Kids', 'Children', 'Families', 'Toddlers', 'Teens', or 'Ages 0-5'. If no specific 'kids' events found, include family-friendly programs.
+        6. TARGET: Only include events for children (0-12), Teens (12-18), or families.
         7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
         8. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
         9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Do not omit the branch name. Search the entire text, including headers and descriptions. If the text says 'In Store [Location]', use that location. NO SUMMARIES: Do not combine events from different branches into a single "All Locations" entry. If the same activity happens at different branches, return exact the same number of separate JSON objects. LOCATION EXTRACTION: Check descriptions and metadata carefully for branch names. NEVER use 'All Locations', 'System-wide', or 'Multiple'. If a specific branch name is not found in the text, skip the event. 'found_location' must contain ONLY the specific branch name (e.g., 'Castro Valley').
@@ -542,10 +549,21 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         events = generate_with_retry(prompt, combined_text, master['name'])
 
         if events:
-            save_events(events, target_branches, midnight, master, mode)
-            print(f"   ✅ Successfully found {len(events)} events for {master['name']}.")
+            # Secondary check to ensure no "Adult" events slipped through the AI
+            exclude_list = ["adult", "senior", "tax prep", "citizenship test"]
+            filtered_events = []
+            for ev in events:
+                check_text = (ev.get('title', '') + " " + ev.get('snippet', '')).lower()
+                if not any(word in check_text for word in exclude_list) or "family" in check_text:
+                    filtered_events.append(ev)
+            
+            if filtered_events:
+                save_events(filtered_events, target_branches, midnight, master, mode)
+                print(f"    ✅ Successfully found {len(filtered_events)} kid-friendly events for {master['name']}.")
+            else:
+                print(f"    ⚠️ All found events were filtered out as non-kid-friendly.")
         else:
-            print(f"   ⚠️ Gemini found 0 events for {master['name']} in the {range_str} window.")
+            print(f"    ⚠️ Gemini found 0 events for {master['name']} in the {range_str} window.")
             
     except Exception as e:
         print(f"❌ Error scraping {master['name']}: {e}")
