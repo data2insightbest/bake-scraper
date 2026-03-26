@@ -435,6 +435,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
     m_name = master.get('name', 'Unknown')
+    is_library = "library" in m_name.lower()
     today = datetime.now()
     future_date = today + timedelta(days=90)
     range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
@@ -499,31 +500,54 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
         # 4. CAPTURE & CLEAN DATA (Stealth + HTML Fallback)
         print(f"    🧹 Cleaning HTML and extracting text...")
-        
-        # Get Raw and Clean HTML first as the broad safety net
+
+         # Get Raw and Clean HTML first as the broad safety net
         raw_html = page.content()
         clean_html = re.sub(r'<(script|style|meta|link|svg|path|footer|nav)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
-        
-        # Stealth Extraction targets specific high-probability event cards
-        stealth_text = page.evaluate("""() => {
-            const selectors = ['.event-card', '.event-item', '.bn-events-container', '.library-event', '.card-content', '.event-list', '.tribe-events-calendar-list'];
-            let foundData = [];
-            for (const s of selectors) {
-                const items = document.querySelectorAll(s);
-                if (items.length > 0) {
-                    items.forEach(i => foundData.push(i.innerText));
-                }
-            }
-            return foundData.join('\\n---\\n');
-        }""")
 
-        # Combine: If stealth found data, use it. Otherwise, use the cleaned HTML text.
-        if stealth_text.strip():
-            combined_text = stealth_text
+        if is_library:
+            # THE LIBRARY TAG SHIELD: Filters based on your provided list
+            combined_text = page.evaluate("""(tags) => {
+                const selectors = ['.event-card', '.event-item', 'article', '.biblio-item', '.trumba-event', '.cp-events-item', '.library-event'];
+                let foundData = [];
+                
+                selectors.forEach(sel => {
+                    document.querySelectorAll(sel).forEach(card => {
+                        const cardText = card.innerText.toLowerCase();
+                        // Matches your exact library tags
+                        const hasTag = tags.some(tag => cardText.includes(tag.toLowerCase()));
+                        
+                        if (hasTag) {
+                            // Extract text only from kids-tagged cards
+                            foundData.push(card.innerText);
+                        }
+                    });
+                });
+                return foundData.join('\\n---\\n');
+            }""", [
+                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", "Children (6 to 9 years)", "Preschoolers (3-5 years)", 
+                "Tweens (9 to 12 years)", "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", "Preschoolers (3-5 yrs)", 
+                "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", "Preschool", "Family Friendly", "Teens", "School Age", 
+                "Baby/Toddler", "Early Childhood", "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
+                "cp-screen-reader-message"
+            ])
         else:
-            # Simple text extraction from the cleaned HTML structure
-            combined_text = re.sub(r'<[^>]+>', ' ', clean_html)
-            combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+            # STANDARD TRACK: Retailers (Home Depot, Slime Kitchen, etc.)
+            stealth_text = page.evaluate("""() => {
+                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.library-event', '.card-content', '.event-list', '.tribe-events-calendar-list'];
+                let foundData = [];
+                for (const s of selectors) {
+                    const items = document.querySelectorAll(s);
+                    if (items.length > 0) items.forEach(i => foundData.push(i.innerText));
+                }
+                return foundData.join('\\n---\\n');
+            }""")
+            
+            if stealth_text.strip():
+                combined_text = stealth_text
+            else:
+                combined_text = re.sub(r'<[^>]+>', ' ', clean_html)
+                combined_text = re.sub(r'\s+', ' ', combined_text).strip()
 
         # Final string safety and token limit management
         combined_text = combined_text.replace('\\n', '\n').strip()
@@ -541,15 +565,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
            DO NOT summarize. I need individual entries to fill the calendar.
         3. Snippet must be 1 sentence describing the activity under 20 words.
         4. If no events found, return [].
-        5. IDENTIFY AGE GROUP: Look for tags like 'Teens (12-18)', 'Children (6-11)', 'Preschoolers (0-5)', 'Kids', 'Children', 'Families', 'Toddlers', 'Teens', or 'Ages 0-5'. If no specific 'kids' events found, include family-friendly programs.
-        6. TARGET: Only include events for children (0-12), Teens (12-18), or families.
+        5. IDENTIFY AGE GROUP: Look for tags like 'Babies & Toddler', 'Kids', 'Teens', 'Preschoolers', 'Teens (13 to 18 years)', 'Children (6 to 9 years)', 'Preschoolers (3-5 years)', 'Tweens (9 to 12 years)', 'Toddlers (1 to 3 years)', 'Kids (5-9 yrs)', 'Babies (0-1 yrs)', 'Families', 'Preschoolers (3-5 yrs)', 'Teens (12-18 yrs)', 'Toddlers (1-3 yrs)', 'Tweens (9-12 yrs)', 'Preschool', 'Family Friendly', 'Teens', 'School Age', 'Baby/Toddler', 'Early Childhood', 'Elementary School Age', 'Family', 'Middle School Age', 'Teen', 'Baby – Preschool', 'Children'
+        6. CONTEXT: If the text looks like a list of store names without times, ignore them. Only extract items that have a TITLE and a specific DATE.
         7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
         8. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
         9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Do not omit the branch name. Search the entire text, including headers and descriptions. If the text says 'In Store [Location]', use that location. NO SUMMARIES: Do not combine events from different branches into a single "All Locations" entry. If the same activity happens at different branches, return exact the same number of separate JSON objects. LOCATION EXTRACTION: Check descriptions and metadata carefully for branch names. NEVER use 'All Locations', 'System-wide', or 'Multiple'. If a specific branch name is not found in the text, skip the event. 'found_location' must contain ONLY the specific branch name (e.g., 'Castro Valley').
         10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
         11. Extract as many events as possible (up to 25). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object. If you reach your token limit, STOP and close the JSON array `]` properly. Never leave a JSON object hanging open.
         12. Output JSON list with these EXACT keys: ["title", "event_date" (YYYY-MM-DD), "snippet", "found_location"].
-        13. CONTEXT: If the text looks like a list of store names without times, ignore them. Only extract items that have a TITLE and a specific DATE.
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
         IMPORTANT: Use the date format YYYY-MM-DD. If year is missing in text, assume {today.year}.
         """
