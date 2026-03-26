@@ -505,53 +505,40 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         raw_html = page.content()
         clean_html = re.sub(r'<(script|style|meta|link|svg|path|footer|nav)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
 
-        if is_library:
-            # THE LIBRARY TAG SHIELD: Filters based on your provided list
-            combined_text = page.evaluate("""(tags) => {
-                const selectors = ['.event-card', '.event-item', 'article', '.biblio-item', '.trumba-event', '.cp-events-item', '.library-event'];
-                let foundData = [];
-                
-                selectors.forEach(sel => {
-                    document.querySelectorAll(sel).forEach(card => {
-                        const cardText = card.innerText.toLowerCase();
-                        // Matches your exact library tags
-                        const hasTag = tags.some(tag => cardText.includes(tag.toLowerCase()));
-                        
-                        if (hasTag) {
-                            // Extract text only from kids-tagged cards
-                            foundData.push(card.innerText);
-                        }
-                    });
-                });
-                return foundData.join('\\n---\\n');
-            }""", [
-                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", "Children (6 to 9 years)", "Preschoolers (3-5 years)", 
-                "Tweens (9 to 12 years)", "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", "Preschoolers (3-5 yrs)", 
-                "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", "Preschool", "Family Friendly", "Teens", "School Age", 
-                "Baby/Toddler", "Early Childhood", "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
-                "cp-screen-reader-message"
-            ])
-        else:
-            # STANDARD TRACK: Retailers (Home Depot, Slime Kitchen, etc.)
-            stealth_text = page.evaluate("""() => {
-                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.library-event', '.card-content', '.event-list', '.tribe-events-calendar-list'];
-                let foundData = [];
-                for (const s of selectors) {
-                    const items = document.querySelectorAll(s);
-                    if (items.length > 0) items.forEach(i => foundData.push(i.innerText));
-                }
-                return foundData.join('\\n---\\n');
-            }""")
+        combined_text = page.evaluate("""(isLibrary, tags) => {
+            const selectors = ['.event-card', '.event-item', '.bn-events-container', '.library-event', '.card-content', '.event-list', '.cp-events-item', '.biblio-item'];
+            let foundData = [];
             
-            if stealth_text.strip():
-                combined_text = stealth_text
-            else:
-                combined_text = re.sub(r'<[^>]+>', ' ', clean_html)
-                combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+            for (const s of selectors) {
+                const items = document.querySelectorAll(s);
+                items.forEach(item => {
+                    const text = item.innerText;
+                    
+                    if (isLibrary) {
+                        // Only keep if it matches your specific kids tags
+                        const hasTag = tags.some(tag => text.toLowerCase().includes(tag.toLowerCase()));
+                        if (hasTag) foundData.push(text);
+                    } else {
+                        // For retailers, keep everything as before
+                        foundData.push(text);
+                    }
+                });
+            }
+            return foundData.join('\\n---\\n');
+        }""", is_library, [
+            "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", "Children (6 to 9 years)", "Preschoolers (3-5 years)", 
+            "Tweens (9 to 12 years)", "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", "Preschoolers (3-5 yrs)", 
+            "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", "Preschool", "Family Friendly", "Teens", "School Age", 
+            "Baby/Toddler", "Early Childhood", "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
+            "cp-screen-reader-message"
+        ])
 
-        # Final string safety and token limit management
-        combined_text = combined_text.replace('\\n', '\n').strip()
-        combined_text = combined_text[:35000]
+        # Fallback if stealth found nothing
+        if not combined_text.strip():
+            combined_text = re.sub(r'<[^>]+>', ' ', clean_html)
+            combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+
+        combined_text = combined_text[:40000]
 
         # 5. The 90-Day Sliding Prompt
         # Force a shorter, stricter JSON structure to avoid "Delimiter" errors
