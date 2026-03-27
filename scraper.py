@@ -501,51 +501,78 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         # 4. CAPTURE & CLEAN DATA (Stealth + HTML Fallback)
         print(f"    🧹 Cleaning HTML and extracting text...")
 
-         # Get Raw and Clean HTML first as the broad safety net
+        # Get Raw and Clean HTML first as the broad safety net
         raw_html = page.content()
-        clean_html = re.sub(r'<(script|style|meta|link|svg|path|footer|nav)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
-
+        clean_html_text = re.sub(r'<(script|style|meta|link|svg|path|footer|nav|header)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
+        clean_html_text = re.sub(r'<[^>]+>', ' ', clean_html_text)
+        clean_html_text = re.sub(r'\s+', ' ', clean_html_text).strip()
+        print(f"    🧹 Extracting content for {m_name}...") 
+        combined_text = ""
         # SEPARATED LOGIC FOR LIBRARIES VS WORKSHOPS
+        
         if is_library:
-            print(f"    📖 Running Library Tag Filter...")
+            # STRATEGY: Capture headers for context, then match cards based on your tag list
+            # We check the card text, aria-labels, and the parent container text.
             combined_text = page.evaluate("""(tags) => {
-                const selectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event', 'article', '.event-row'];
-                let foundData = [];
-                selectors.forEach(s => {
-                    document.querySelectorAll(s).forEach(item => {
-                        const aria = item.getAttribute('aria-label') || "";
-                        const title = item.getAttribute('title') || "";
-                        const fullSearch = (item.innerText + " " + aria + " " + title).toLowerCase();                    
-                        const hasTag = tags.some(tag => fullSearch.includes(tag.toLowerCase()));
-                        if (hasTag) foundData.push(item.innerText);
+                const cardSelectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event', 'article', '.event-row'];
+                let capturedBlocks = new Set();
+                
+                // 1. Capture Global Context (Headers/Breadcrumbs) 
+                // This ensures "Fremont Library > Kids" context is preserved
+                const contextHeaders = Array.from(document.querySelectorAll('h1, h2, .location-header, .breadcrumb, .category-title'))
+                                            .map(h => h.innerText).join(' | ');
+                
+                // 2. Scan for Event Cards and verify Tags
+                cardSelectors.forEach(selector => {
+                    document.querySelectorAll(selector).forEach(card => {
+                        const cardText = card.innerText.toLowerCase();
+                        const aria = (card.getAttribute('aria-label') || "").toLowerCase();
+                        const titleAttr = (card.getAttribute('title') || "").toLowerCase();
+                        
+                        // Check for tags inside the card
+                        let hasTag = tags.some(t => 
+                            cardText.includes(t.toLowerCase()) || 
+                            aria.includes(t.toLowerCase()) || 
+                            titleAttr.includes(t.toLowerCase())
+                        );
+                        
+                        // RELATIONAL CHECK: If no tag in card, check the immediate parent/section header
+                        if (!hasTag && card.parentElement) {
+                            const parentText = card.parentElement.innerText.toLowerCase();
+                            hasTag = tags.some(t => parentText.includes(t.toLowerCase()));
+                        }
+                        
+                        if (hasTag) {
+                            capturedBlocks.add(card.innerText);
+                        }
                     });
                 });
-                return foundData.join('\\n---\\n');
+                
+                return "CONTEXT: " + contextHeaders + "\\n---\\n" + Array.from(capturedBlocks).join('\\n---\\n');
             }""", [
-                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", "Children (6 to 9 years)", "Preschoolers (3-5 years)", 
-                "Tweens (9 to 12 years)", "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", "Preschoolers (3-5 yrs)", 
-                "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", "Preschool", "Family Friendly", "Teens", "School Age", "Baby/Toddler", 
-                "Early Childhood", "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
+                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
+                "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
+                "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", 
+                "Preschoolers (3-5 yrs)", "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", 
+                "Preschool", "Family Friendly", "Teens", "School Age", "Baby/Toddler", "Early Childhood", 
+                "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children",
+                "Storytime", "LEGO", "STEM", "STEAM", "Maker"
             ])
         else:
-            print(f"    🛠️ Running Workshop Direct Extraction...")
+            # WORKSHOP logic (Broad extraction for Slime Kitchen, etc.)
             combined_text = page.evaluate("""() => {
-                // Expanded selectors for workshops like Slime Kitchen
-                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item', 'article', '.product-card', '.item-details'];
+                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item', 'article', '.product-card'];
                 let foundData = [];
                 for (const s of selectors) {
                     const items = document.querySelectorAll(s);
-                    items.forEach(i => { 
-                        if(i.innerText.length > 30) foundData.push(i.innerText); 
-                    });
+                    items.forEach(i => { if(i.innerText.length > 25) foundData.push(i.innerText); });
                 }
                 return foundData.join('\\n---\\n');
             }""")
-        
-        if not combined_text or len(combined_text.strip()) < 300:
-            print(f"    ⚠️ Selectors failed for {m_name}. Using Broad Safety Net (Clean HTML).")
-            combined_text = clean_html_text
 
+        if not combined_text or len(combined_text.strip()) < 600:
+            print(f"    ⚠️ Filter too strict for {m_name} ({len(combined_text)} chars). Using Safety Net.")
+            combined_text = clean_html_text
         combined_text = combined_text[:45000]
         
         # 5. The 90-Day Sliding Prompt
