@@ -507,27 +507,41 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
         # SEPARATED LOGIC FOR LIBRARIES VS WORKSHOPS
         if is_library:
-            print(f"    📖 Using Library Tag-Filtered Extraction...")
+            print(f"    📖 Deep-Scanning Library Tags...")
+            # FIX: We now look at the card PLUS any hidden attributes (like aria-labels) 
+            # where libraries often store "Age Group" data.
             combined_text = page.evaluate("""(tags) => {
-                const selectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event'];
+                const selectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event', 'article', '.event-row'];
                 let foundData = [];
+                
                 selectors.forEach(s => {
                     document.querySelectorAll(s).forEach(item => {
-                        const text = item.innerText;
-                        const hasTag = tags.some(tag => text.toLowerCase().includes(tag.toLowerCase()));
-                        if (hasTag) foundData.push(text);
+                        // 1. Get visible text
+                        const visibleText = item.innerText.toLowerCase();
+                        
+                        // 2. Get hidden metadata (very common in Library CMS like BiblioCommons)
+                        const ariaText = (item.getAttribute('aria-label') || "").toLowerCase();
+                        const titleText = (item.getAttribute('title') || "").toLowerCase();
+                        const dataCategory = (item.getAttribute('data-category') || "").toLowerCase();
+                        
+                        const fullSearchableText = `${visibleText} ${ariaText} ${titleText} ${dataCategory}`;
+                        
+                        // 3. Strict match against your provided tag list
+                        const hasTag = tags.some(tag => fullSearchableText.includes(tag.toLowerCase()));
+                        
+                        if (hasTag) {
+                            foundData.append(item.innerText);
+                        }
                     });
                 });
                 return foundData.join('\\n---\\n');
             }""", [
-                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", "Children (6 to 9 years)", "Preschoolers (3-5 years)", 
-                "Tweens (9 to 12 years)", "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", "Preschoolers (3-5 yrs)", 
-                "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", "Preschool", "Family Friendly", "Teens", "School Age", 
-                "Baby/Toddler", "Early Childhood", "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
-                "cp-screen-reader-message"
+                "Babies", "Toddler", "Kids", "Teens", "Preschoolers", "Tweens", "Families", 
+                "Family Friendly", "School Age", "Early Childhood", "Elementary", "Middle School", 
+                "Children", "Storytime", "LEGO", "Workshop", "Play", "Craft", "Maker", "STEAM", "STEM"
             ])
         else:
-            print(f"    🛠️ Using Original Workshop Extraction...")
+            # ORIGINAL WORKSHOP CODE (Worked perfectly before)
             combined_text = page.evaluate("""() => {
                 const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item'];
                 let foundData = [];
@@ -539,8 +553,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             }""")
 
         # Fallback if stealth found nothing
-        if not combined_text.strip():
-            combined_text = re.sub(r'<[^>]+>', ' ', clean_html)
+        if not combined_text or len(combined_text.strip()) < 200:
+            combined_text = re.sub(r'<[^>]+>', ' ', clean_html_text)
             combined_text = re.sub(r'\s+', ' ', combined_text).strip()
 
         combined_text = combined_text[:45000]
@@ -550,7 +564,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         prompt = f"""
         Extract events at {master['name']} from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
         Rules:
-        1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "..."}}]. No intro text, no markdown backticks, and no summary at the end.
+        1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}]. No intro text, no markdown backticks, and no summary at the end.
         2. DATE RULE: You must find the specific date. If the text says 'Every Monday', calculate the next 3 Mondays starting after {today.strftime('%B %d, %Y')}. 
            IMPORTANT: If NO specific date is found, use 'UNKNOWN' for event_date. DO NOT use today's date ({today.strftime('%Y-%m-%d')}) as a fallback.
            DATE EXPANSION: For recurring events like "Homework Help" or "Storytime" (e.g., 'Every Monday' or 'Mon-Thu'), you MUST generate a separate JSON object for EVERY SINGLE DATE for the next 90 days.
