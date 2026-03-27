@@ -506,56 +506,41 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         clean_html = re.sub(r'<(script|style|meta|link|svg|path|footer|nav)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
 
         # SEPARATED LOGIC FOR LIBRARIES VS WORKSHOPS
-        if is_library:
-            print(f"    📖 Deep-Scanning Library Tags...")
-            # FIX: We now look at the card PLUS any hidden attributes (like aria-labels) 
-            # where libraries often store "Age Group" data.
+         if is_library:
+            # For Libraries: Use the Tag-based card extraction
             combined_text = page.evaluate("""(tags) => {
                 const selectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event', 'article', '.event-row'];
                 let foundData = [];
-                
                 selectors.forEach(s => {
                     document.querySelectorAll(s).forEach(item => {
-                        // 1. Get visible text
-                        const visibleText = item.innerText.toLowerCase();
-                        
-                        // 2. Get hidden metadata (very common in Library CMS like BiblioCommons)
-                        const ariaText = (item.getAttribute('aria-label') || "").toLowerCase();
-                        const titleText = (item.getAttribute('title') || "").toLowerCase();
-                        const dataCategory = (item.getAttribute('data-category') || "").toLowerCase();
-                        
-                        const fullSearchableText = `${visibleText} ${ariaText} ${titleText} ${dataCategory}`;
-                        
-                        // 3. Strict match against your provided tag list
-                        const hasTag = tags.some(tag => fullSearchableText.includes(tag.toLowerCase()));
-                        
-                        if (hasTag) {
-                            foundData.append(item.innerText);
-                        }
+                        const fullText = (item.innerText + " " + (item.getAttribute('aria-label') || "")).toLowerCase();
+                        const hasTag = tags.some(tag => fullText.includes(tag.toLowerCase()));
+                        if (hasTag) foundData.push(item.innerText);
                     });
                 });
                 return foundData.join('\\n---\\n');
             }""", [
-                "Babies", "Toddler", "Kids", "Teens", "Preschoolers", "Tweens", "Families", 
-                "Family Friendly", "School Age", "Early Childhood", "Elementary", "Middle School", 
-                "Children", "Storytime", "LEGO", "Workshop", "Play", "Craft", "Maker", "STEAM", "STEM"
+                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", "Children (6 to 9 years)", "Preschoolers (3-5 years)", 
+                "Tweens (9 to 12 years)", "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", "Preschoolers (3-5 yrs)", 
+                "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", "Preschool", "Family Friendly", "Teens", "School Age", "Baby/Toddler", 
+                "Early Childhood", "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
             ])
         else:
-            # ORIGINAL WORKSHOP CODE (Worked perfectly before)
+            # For Non-Libraries (Workshops, Slime Kitchen, etc.): Use the original card extraction
             combined_text = page.evaluate("""() => {
-                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item'];
+                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item', 'article'];
                 let foundData = [];
                 for (const s of selectors) {
                     const items = document.querySelectorAll(s);
-                    if (items.length > 0) items.forEach(i => foundData.push(i.innerText));
+                    items.forEach(i => { if(i.innerText.length > 20) foundData.push(i.innerText); });
                 }
                 return foundData.join('\\n---\\n');
             }""")
 
         # Fallback if stealth found nothing
         if not combined_text or len(combined_text.strip()) < 200:
-            combined_text = re.sub(r'<[^>]+>', ' ', clean_html_text)
-            combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+            print(f"    ⚠️ Selectors found limited data, using Broad Safety Net for {m_name}")
+            combined_text = clean_html_text
 
         combined_text = combined_text[:45000]
         
