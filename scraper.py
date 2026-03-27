@@ -505,41 +505,46 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         raw_html = page.content()
         clean_html = re.sub(r'<(script|style|meta|link|svg|path|footer|nav)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
 
-        combined_text = page.evaluate("""(isLibrary, tags) => {
-            const selectors = ['.event-card', '.event-item', '.bn-events-container', '.library-event', '.card-content', '.event-list', '.cp-events-item', '.biblio-item'];
-            let foundData = [];
-            
-            for (const s of selectors) {
-                const items = document.querySelectorAll(s);
-                items.forEach(item => {
-                    const text = item.innerText;
-                    
-                    if (isLibrary) {
-                        // Only keep if it matches your specific kids tags
+        # SEPARATED LOGIC FOR LIBRARIES VS WORKSHOPS
+        if is_library:
+            print(f"    📖 Using Library Tag-Filtered Extraction...")
+            combined_text = page.evaluate("""(tags) => {
+                const selectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event'];
+                let foundData = [];
+                selectors.forEach(s => {
+                    document.querySelectorAll(s).forEach(item => {
+                        const text = item.innerText;
                         const hasTag = tags.some(tag => text.toLowerCase().includes(tag.toLowerCase()));
                         if (hasTag) foundData.push(text);
-                    } else {
-                        // For retailers, keep everything as before
-                        foundData.push(text);
-                    }
+                    });
                 });
-            }
-            return foundData.join('\\n---\\n');
-        }""", is_library, [
-            "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", "Children (6 to 9 years)", "Preschoolers (3-5 years)", 
-            "Tweens (9 to 12 years)", "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", "Preschoolers (3-5 yrs)", 
-            "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", "Preschool", "Family Friendly", "Teens", "School Age", 
-            "Baby/Toddler", "Early Childhood", "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
-            "cp-screen-reader-message"
-        ])
+                return foundData.join('\\n---\\n');
+            }""", [
+                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", "Children (6 to 9 years)", "Preschoolers (3-5 years)", 
+                "Tweens (9 to 12 years)", "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", "Preschoolers (3-5 yrs)", 
+                "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", "Preschool", "Family Friendly", "Teens", "School Age", 
+                "Baby/Toddler", "Early Childhood", "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
+                "cp-screen-reader-message"
+            ])
+        else:
+            print(f"    🛠️ Using Original Workshop Extraction...")
+            combined_text = page.evaluate("""() => {
+                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item'];
+                let foundData = [];
+                for (const s of selectors) {
+                    const items = document.querySelectorAll(s);
+                    if (items.length > 0) items.forEach(i => foundData.push(i.innerText));
+                }
+                return foundData.join('\\n---\\n');
+            }""")
 
         # Fallback if stealth found nothing
         if not combined_text.strip():
             combined_text = re.sub(r'<[^>]+>', ' ', clean_html)
             combined_text = re.sub(r'\s+', ' ', combined_text).strip()
 
-        combined_text = combined_text[:40000]
-
+        combined_text = combined_text[:45000]
+        
         # 5. The 90-Day Sliding Prompt
         # Force a shorter, stricter JSON structure to avoid "Delimiter" errors
         prompt = f"""
