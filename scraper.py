@@ -515,8 +515,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     document.querySelectorAll(s).forEach(item => {
                         const aria = item.getAttribute('aria-label') || "";
                         const title = item.getAttribute('title') || "";
-                        const fullSearch = (item.innerText + " " + aria + " " + title).toLowerCase();
-                        
+                        const fullSearch = (item.innerText + " " + aria + " " + title).toLowerCase();                    
                         const hasTag = tags.some(tag => fullSearch.includes(tag.toLowerCase()));
                         if (hasTag) foundData.push(item.innerText);
                     });
@@ -543,7 +542,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 return foundData.join('\\n---\\n');
             }""")
         
-       if not combined_text or len(combined_text.strip()) < 300:
+        if not combined_text or len(combined_text.strip()) < 300:
             print(f"    ⚠️ Selectors failed for {m_name}. Using Broad Safety Net (Clean HTML).")
             combined_text = clean_html_text
 
