@@ -506,15 +506,18 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         clean_html = re.sub(r'<(script|style|meta|link|svg|path|footer|nav)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
 
         # SEPARATED LOGIC FOR LIBRARIES VS WORKSHOPS
-         if is_library:
-            # For Libraries: Use the Tag-based card extraction
+        if is_library:
+            print(f"    📖 Running Library Tag Filter...")
             combined_text = page.evaluate("""(tags) => {
                 const selectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event', 'article', '.event-row'];
                 let foundData = [];
                 selectors.forEach(s => {
                     document.querySelectorAll(s).forEach(item => {
-                        const fullText = (item.innerText + " " + (item.getAttribute('aria-label') || "")).toLowerCase();
-                        const hasTag = tags.some(tag => fullText.includes(tag.toLowerCase()));
+                        const aria = item.getAttribute('aria-label') || "";
+                        const title = item.getAttribute('title') || "";
+                        const fullSearch = (item.innerText + " " + aria + " " + title).toLowerCase();
+                        
+                        const hasTag = tags.some(tag => fullSearch.includes(tag.toLowerCase()));
                         if (hasTag) foundData.push(item.innerText);
                     });
                 });
@@ -526,20 +529,22 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 "Early Childhood", "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
             ])
         else:
-            # For Non-Libraries (Workshops, Slime Kitchen, etc.): Use the original card extraction
+            print(f"    🛠️ Running Workshop Direct Extraction...")
             combined_text = page.evaluate("""() => {
-                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item', 'article'];
+                // Expanded selectors for workshops like Slime Kitchen
+                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item', 'article', '.product-card', '.item-details'];
                 let foundData = [];
                 for (const s of selectors) {
                     const items = document.querySelectorAll(s);
-                    items.forEach(i => { if(i.innerText.length > 20) foundData.push(i.innerText); });
+                    items.forEach(i => { 
+                        if(i.innerText.length > 30) foundData.push(i.innerText); 
+                    });
                 }
                 return foundData.join('\\n---\\n');
             }""")
-
-        # Fallback if stealth found nothing
-        if not combined_text or len(combined_text.strip()) < 200:
-            print(f"    ⚠️ Selectors found limited data, using Broad Safety Net for {m_name}")
+        
+       if not combined_text or len(combined_text.strip()) < 300:
+            print(f"    ⚠️ Selectors failed for {m_name}. Using Broad Safety Net (Clean HTML).")
             combined_text = clean_html_text
 
         combined_text = combined_text[:45000]
