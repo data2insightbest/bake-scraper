@@ -508,58 +508,50 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         clean_html_text = re.sub(r'\s+', ' ', clean_html_text).strip()
         print(f"    🧹 Extracting content for {m_name}...") 
         combined_text = ""
+       
         # SEPARATED LOGIC FOR LIBRARIES VS WORKSHOPS
-        
         if is_library:
-            # STRATEGY: Capture headers for context, then match cards based on your tag list
-            # We check the card text, aria-labels, and the parent container text.
-            combined_text = page.evaluate("""(tags) => {
-                const cardSelectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event', 'article', '.event-row'];
-                let capturedBlocks = new Set();
-                
-                // 1. Capture Global Context (Headers/Breadcrumbs) 
-                // This ensures "Fremont Library > Kids" context is preserved
-                const contextHeaders = Array.from(document.querySelectorAll('h1, h2, .location-header, .breadcrumb, .category-title'))
-                                            .map(h => h.innerText).join(' | ');
-                
-                // 2. Scan for Event Cards and verify Tags
-                cardSelectors.forEach(selector => {
+            # STRATEGY: Scrape every event card, but immediately discard it if 
+            # it doesn't contain at least one of your "Kids/Family" tags.
+            combined_text = page.evaluate("""(tagList) => {
+                const selectors = [
+                    '.event-card', '.event-item', '.library-event', '.cp-events-item', 
+                    '.biblio-item', '.trumba-event', 'article', '.event-row'
+                ];             
+                // 1. Capture Headers for Location Context
+                const headers = Array.from(document.querySelectorAll('h1, h2, .location-header, .breadcrumb'))
+                                     .map(h => h.innerText).join(' | ');       
+                let validCards = [];
+                selectors.forEach(selector => {
                     document.querySelectorAll(selector).forEach(card => {
                         const cardText = card.innerText.toLowerCase();
                         const aria = (card.getAttribute('aria-label') || "").toLowerCase();
-                        const titleAttr = (card.getAttribute('title') || "").toLowerCase();
                         
-                        // Check for tags inside the card
-                        let hasTag = tags.some(t => 
-                            cardText.includes(t.toLowerCase()) || 
-                            aria.includes(t.toLowerCase()) || 
-                            titleAttr.includes(t.toLowerCase())
-                        );
-                        
-                        // RELATIONAL CHECK: If no tag in card, check the immediate parent/section header
-                        if (!hasTag && card.parentElement) {
-                            const parentText = card.parentElement.innerText.toLowerCase();
-                            hasTag = tags.some(t => parentText.includes(t.toLowerCase()));
-                        }
-                        
-                        if (hasTag) {
-                            capturedBlocks.add(card.innerText);
+                        // Check if ANY of your provided tags exist in this specific card
+                        const hasValidTag = tagList.some(tag => 
+                            cardText.includes(tag.toLowerCase()) || 
+                            aria.includes(tag.toLowerCase())
+                        );                     
+                        if (hasValidTag) {
+                            validCards.push(card.innerText);
                         }
                     });
                 });
+
+                // If no cards matched the tags, return a small warning or fallback
+                if (validCards.length === 0) return "NO_TAG_MATCHES_FOUND";
                 
-                return "CONTEXT: " + contextHeaders + "\\n---\\n" + Array.from(capturedBlocks).join('\\n---\\n');
+                return "CONTEXT: " + headers + "\\n---\\n" + Array.from(new Set(validCards)).join('\\n---\\n');
             }""", [
                 "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
                 "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
                 "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", 
                 "Preschoolers (3-5 yrs)", "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", 
                 "Preschool", "Family Friendly", "Teens", "School Age", "Baby/Toddler", "Early Childhood", 
-                "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children",
-                "Storytime", "LEGO", "STEM", "STEAM", "Maker"
+                "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
             ])
         else:
-            # WORKSHOP logic (Broad extraction for Slime Kitchen, etc.)
+            # WORKSHOP logic (Non-Library)
             combined_text = page.evaluate("""() => {
                 const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item', 'article', '.product-card'];
                 let foundData = [];
@@ -570,9 +562,12 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 return foundData.join('\\n---\\n');
             }""")
 
-        if not combined_text or len(combined_text.strip()) < 600:
-            print(f"    ⚠️ Filter too strict for {m_name} ({len(combined_text)} chars). Using Safety Net.")
-            combined_text = clean_html_text
+        if "NO_TAG_MATCHES_FOUND" in combined_text or len(combined_text.strip()) < 500:
+            print(f"    ⚠️ Tag filter returned nothing. Falling back to full text for {m_name}")
+            raw_html = page.content()
+            clean_text = re.sub(r'<(script|style|meta|link|svg|path|footer|nav|header)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
+            clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+            combined_text = re.sub(r'\s+', ' ', clean_text).strip()
         combined_text = combined_text[:45000]
         
         # 5. The 90-Day Sliding Prompt
