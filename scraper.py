@@ -510,37 +510,53 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         combined_text = ""
        
         # SEPARATED LOGIC FOR LIBRARIES VS WORKSHOPS
+        kids_tags = [
+            "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
+            "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
+            "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", 
+            "Preschoolers (3-5 yrs)", "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", 
+            "Preschool", "Family Friendly", "Teens", "School Age", "Baby/Toddler", "Early Childhood", 
+            "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
+        ]
         if is_library:
-            # OPTION A: LIBRARY TAG FILTER
-            # Only keeps cards that explicitly match your kids/family tags.
+            # NARROWED SELECTORS: Focusing on BiblioCommons and standard calendar items only
+            # Removed generic 'article' and 'div' to prevent picking up footer/sidebar noise
             combined_text = page.evaluate("""(tagList) => {
-                const selectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event', 'article', '.event-row'];
+                const selectors = [
+                    '.cp-event-item', '.cp-events-item', '.biblio-item', 
+                    '.trumba-event', '.calendar-event', '.event-listing'
+                ];
                 const headers = Array.from(document.querySelectorAll('h1, h2, .location-header, .breadcrumb')).map(h => h.innerText).join(' | ');
                 
                 let validCards = [];
                 selectors.forEach(selector => {
                     document.querySelectorAll(selector).forEach(card => {
+                        // NARROW METADATA: Specifically target the 'Audience' or 'Tags' section of the card
+                        const metaPart = card.querySelector('.cp-event-audience, .cp-event-item-metadata, .event-meta, .audience, .tags');
                         const cardText = card.innerText.toLowerCase();
-                        const aria = (card.getAttribute('aria-label') || "").toLowerCase();
-                        const hasValidTag = tagList.some(tag => cardText.includes(tag.toLowerCase()) || aria.includes(tag.toLowerCase()));
+                        const metaText = metaPart ? metaPart.innerText.toLowerCase() : "";
                         
-                        if (hasValidTag) { validCards.push(card.innerText); }
+                        // Check if ANY kid tag exists specifically in the Audience/Metadata area
+                        const hasValidTag = tagList.some(tag => {
+                            const t = tag.toLowerCase();
+                            const regex = new RegExp('\\\\b' + t.replace(/[.*+?^${}()|[\\\\\]]/g, '\\\\$&') + '\\\\b', 'i');
+                            return regex.test(metaText) || (metaText === "" && regex.test(cardText));
+                        });
+                        
+                        // STRICT BLOCK: If it's explicitly for Adults or Seniors in the metadata, kill it immediately
+                        const isAdultOnly = /\\badult\\b|\\bsenior\\b|\\baged 18\\+|\\b18 plus\\b/i.test(metaText);
+                        
+                        if (hasValidTag && !isAdultOnly) { 
+                            validCards.push(card.innerText); 
+                        }
                     });
                 });
                 
                 if (validCards.length === 0) return ""; 
                 return "CONTEXT: " + headers + "\\n---\\n" + Array.from(new Set(validCards)).join('\\n---\\n');
-            }""", [
-                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
-                "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
-                "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", 
-                "Preschoolers (3-5 yrs)", "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", 
-                "Preschool", "Family Friendly", "Teens", "School Age", "Baby/Toddler", "Early Childhood", 
-                "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
-            ])
+            }""", kids_tags)
         else:
-            # OPTION B: WORKSHOP/GENERAL (Slime Kitchen, etc.)
-            # No tag filtering here - we want everything that looks like an event.
+            # Workshop/General (Slime Kitchen etc) - Keep broader to catch custom site layouts
             combined_text = page.evaluate("""() => {
                 const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item', 'article', '.product-card', '.vc_column-inner'];
                 let foundData = [];
@@ -552,15 +568,20 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 return foundData.join('\\n---\\n');
             }""")
 
-        # --- UNIVERSAL CLEANUP & SAFETY FALLBACK ---
-        # Only run the heavy 'Clean Body' fallback if the specific selectors above found nothing.
+        # Final Fallback - Still uses filtering for libraries
         if not combined_text or len(combined_text.strip()) < 300:
-            print(f"    ⚠️ Selective extraction found minimal data. Attempting general body clean-up for {m_name}")
+            print(f"    ⚠️ Selective extraction found minimal data. Attempting filtered body clean-up for {m_name}")
             raw_html = page.content()
-            # Strip noise but keep content
             clean_text = re.sub(r'<(script|style|meta|link|svg|path|footer|nav|header)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
             clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
-            combined_text = re.sub(r'\s+', ' ', clean_text).strip()
+            
+            if is_library:
+                pattern = '|'.join([re.escape(tag) for tag in kids_tags])
+                sections = clean_text.split('.')
+                filtered_sections = [s for s in sections if re.search(pattern, s, re.IGNORECASE) and not re.search(r'\badult\b|\bsenior\b', s, re.IGNORECASE)]
+                combined_text = ". ".join(filtered_sections)
+            else:
+                combined_text = re.sub(r'\s+', ' ', clean_text).strip()
 
         combined_text = combined_text[:45000]
 
