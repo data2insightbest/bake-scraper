@@ -511,37 +511,24 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
        
         # SEPARATED LOGIC FOR LIBRARIES VS WORKSHOPS
         if is_library:
-            # STRATEGY: Scrape every event card, but immediately discard it if it doesn't contain at least one of your "Kids/Family" tags.
+            # OPTION A: LIBRARY TAG FILTER
+            # Only keeps cards that explicitly match your kids/family tags.
             combined_text = page.evaluate("""(tagList) => {
-                const selectors = [
-                    '.event-card', '.event-item', '.library-event', '.cp-events-item', 
-                    '.biblio-item', '.trumba-event', 'article', '.event-row'
-                ];             
-                
-                // 1. Capture Headers for Location Context
-                const headers = Array.from(document.querySelectorAll('h1, h2, .location-header, .breadcrumb'))
-                                     .map(h => h.innerText).join(' | ');       
+                const selectors = ['.event-card', '.event-item', '.library-event', '.cp-events-item', '.biblio-item', '.trumba-event', 'article', '.event-row'];
+                const headers = Array.from(document.querySelectorAll('h1, h2, .location-header, .breadcrumb')).map(h => h.innerText).join(' | ');
                 
                 let validCards = [];
                 selectors.forEach(selector => {
                     document.querySelectorAll(selector).forEach(card => {
                         const cardText = card.innerText.toLowerCase();
                         const aria = (card.getAttribute('aria-label') || "").toLowerCase();
+                        const hasValidTag = tagList.some(tag => cardText.includes(tag.toLowerCase()) || aria.includes(tag.toLowerCase()));
                         
-                        // Check if ANY of your provided tags exist in this specific card
-                        const hasValidTag = tagList.some(tag => 
-                            cardText.includes(tag.toLowerCase()) || 
-                            aria.includes(tag.toLowerCase())
-                        );                      
-                        
-                        if (hasValidTag) {
-                            validCards.push(card.innerText);
-                        }
+                        if (hasValidTag) { validCards.push(card.innerText); }
                     });
                 });
-
-                if (validCards.length === 0) return "NO_KIDS_EVENTS_FOUND";
                 
+                if (validCards.length === 0) return ""; 
                 return "CONTEXT: " + headers + "\\n---\\n" + Array.from(new Set(validCards)).join('\\n---\\n');
             }""", [
                 "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
@@ -552,26 +539,31 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
             ])
         else:
-            # WORKSHOP logic (Non-Library)
+            # OPTION B: WORKSHOP/GENERAL (Slime Kitchen, etc.)
+            # No tag filtering here - we want everything that looks like an event.
             combined_text = page.evaluate("""() => {
-                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item', 'article', '.product-card'];
+                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.card-content', '.event-list', '.workshop-item', 'article', '.product-card', '.vc_column-inner'];
                 let foundData = [];
-                for (const s of selectors) {
-                    const items = document.querySelectorAll(s);
-                    items.forEach(i => { if(i.innerText.length > 25) foundData.push(i.innerText); });
-                }
+                selectors.forEach(s => {
+                    document.querySelectorAll(s).forEach(i => { 
+                        if(i.innerText.length > 30) foundData.push(i.innerText); 
+                    });
+                });
                 return foundData.join('\\n---\\n');
             }""")
 
-        # Clean text and enforce character limit for AI stability
-        combined_text = re.sub(r'\s+', ' ', combined_text).strip()
+        # --- UNIVERSAL CLEANUP & SAFETY FALLBACK ---
+        # Only run the heavy 'Clean Body' fallback if the specific selectors above found nothing.
+        if not combined_text or len(combined_text.strip()) < 300:
+            print(f"    ⚠️ Selective extraction found minimal data. Attempting general body clean-up for {m_name}")
+            raw_html = page.content()
+            # Strip noise but keep content
+            clean_text = re.sub(r'<(script|style|meta|link|svg|path|footer|nav|header)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
+            clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+            combined_text = re.sub(r'\s+', ' ', clean_text).strip()
+
         combined_text = combined_text[:45000]
 
-        # If the tag filter produced no results, we exit early to prevent Adult leaks from fallbacks
-        if "NO_KIDS_EVENTS_FOUND" in combined_text:
-            print(f"    ⚠️ No events matched the kids' tags for {m_name}. Skipping AI processing.")
-            return
-        
         # 5. The 90-Day Sliding Prompt
         # Force a shorter, stricter JSON structure to avoid "Delimiter" errors
         prompt = f"""
