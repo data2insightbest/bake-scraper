@@ -519,41 +519,40 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
         ]
         if is_library:
-            # SURGICAL EXTRACTION FOR LIBRARIES
+            # RESTRICTIVE EXTRACTION: Focus strictly on metadata to prevent keyword leakage
             combined_text = page.evaluate("""(tagList) => {
-                const selectors = ['.cp-event-item', '.cp-events-item', '.biblio-item', '.trumba-event', '.calendar-event'];
+                const selectors = ['.cp-event-item', '.cp-events-item', '.biblio-item'];
                 let validEvents = [];
                 
                 selectors.forEach(selector => {
                     document.querySelectorAll(selector).forEach(card => {
-                        // 1. ISOLATE METADATA ONLY (The 'Audience' span or specific tag classes)
+                        // 1. TARGET SPECIFIC TAG CONTAINERS
                         const audiencePart = card.querySelector('.cp-event-audience, .cp-event-item-metadata, .audience, .tags');
                         const typePart = card.querySelector('.cp-event-type, .category');
+                        const titlePart = card.querySelector('.cp-event-title, h2, h3, .title');
                         
                         const metaText = (audiencePart ? audiencePart.innerText : "") + " " + (typePart ? typePart.innerText : "");
                         const lowerMeta = metaText.toLowerCase();
                         
-                        // 2. INCLUSION-FIRST LOGIC
-                        // Check if metadata contains ANY kid/family tag
+                        // 2. TAG VALIDATION
                         const hasKidTag = tagList.some(tag => {
                             const t = tag.toLowerCase();
                             const regex = new RegExp('\\\\b' + t.replace(/[.*+?^${}()|[\\\\\]]/g, '\\\\$&') + '\\\\b', 'i');
                             return regex.test(lowerMeta);
                         });
 
-                        // 3. REJECTION LOGIC
-                        // Only reject if it has an Adult tag AND NO Kid tag.
-                        // If it has BOTH (Family events), it stays.
-                        const hasAdultTag = /\\badult\\b|\\bsenior\\b|\\baged 18\\+|\\b18 plus\\b/i.test(lowerMeta);
-                        
+                        // 3. SELECTION RULE
+                        // We ONLY include it if a kid tag is found in the metadata/tags section.
                         if (hasKidTag) {
-                            // If it's for kids/families, we grab the full text for the AI
-                            validEvents.push(card.innerText);
-                        } else if (hasAdultTag) {
-                            // If it ONLY has adult tags, we skip it
-                            return;
+                            // To prevent "High School" leakage from the body, we prioritize metadata for the AI
+                            const eventData = {
+                                title: titlePart ? titlePart.innerText : "Unknown Event",
+                                tags: metaText,
+                                date_raw: card.innerText.match(/\\w+ \\d+, \\d+/g)?.[0] || "See Body",
+                                full_card: card.innerText 
+                            };
+                            validEvents.push(`TITLE: ${eventData.title}\\nTAGS: ${eventData.tags}\\nCONTENT: ${eventData.full_card}`);
                         }
-                        // Note: Events with NO tags at all are skipped to avoid noise
                     });
                 });
                 
@@ -562,11 +561,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         else:
             # Workshop/General (Slime Kitchen etc)
             combined_text = page.evaluate("""() => {
-                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.workshop-item', '.vc_column-inner'];
+                const selectors = ['.event-card', '.event-item', '.bn-events-container', '.workshop-item', '.vc_column-inner', 'article'];
                 let foundData = [];
                 selectors.forEach(s => {
                     document.querySelectorAll(s).forEach(i => { 
-                        if(i.innerText.length > 30) foundData.push(i.innerText); 
+                        if(i.innerText.length > 50) foundData.push(i.innerText); 
                     });
                 });
                 return foundData.join('\\n---\\n');
@@ -576,15 +575,16 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         if not combined_text or len(combined_text.strip()) < 300:
             print(f"    ⚠️ Selective extraction found minimal data. Attempting filtered clean-up...")
             raw_html = page.content()
+            # Strip tags but preserve structure for splitting
             clean_text = re.sub(r'<(script|style|meta|link|svg|path|footer|nav|header)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
             clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
             
             if is_library:
+                # Secondary strict filter for Libraries in fallback mode
                 pattern = '|'.join([re.escape(tag) for tag in kids_tags])
                 sections = clean_text.split('.')
-                # Keep section if it has a kid tag.
-                # Only exclude if it is explicitly adult-themed without a kid-tag presence nearby.
-                filtered_sections = [s for s in sections if re.search(pattern, s, re.IGNORECASE)]
+                # Keep section ONLY if it has an explicit kid tag.
+                filtered_sections = [s.strip() for s in sections if re.search(pattern, s, re.IGNORECASE)]
                 combined_text = ". ".join(filtered_sections)
             else:
                 combined_text = re.sub(r'\s+', ' ', clean_text).strip()
