@@ -524,6 +524,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 let eventData = [];
                 let seenTitles = new Set();
                 
+                // --- ATTEMPT 1: Selective Card-Based Grab ---
                 cardSelectors.forEach(selector => {
                     document.querySelectorAll(selector).forEach(card => {
                         const titleEl = card.querySelector('h2, h3, .title, .cp-event-title');
@@ -549,7 +550,25 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         }
                     });
                 });
-                return eventData.join('\\n---\\n');
+
+                // --- ATTEMPT 2: Recursive Recursive Fallback (Only if Attempt 1 fails) ---
+                if (eventData.length === 0) {
+                    // Deep scan every meaningful container on the page
+                    const elements = document.querySelectorAll('div, section, li');
+                    elements.forEach(el => {
+                        const txt = el.innerText;
+                        // Avoid grabbing the entire page at once; look for specific event-sized chunks
+                        if (txt.length > 100 && txt.length < 1500) {
+                            // Only include if it strictly contains one of the tags
+                            const hasTag = tagList.some(t => txt.toLowerCase().includes(t.toLowerCase()));
+                            if (hasTag) {
+                                eventData.push(`[RECURSIVE_MATCH]\\nCONTENT: ${txt}`);
+                            }
+                        }
+                    });
+                }
+
+                return eventData.slice(0, 60).join('\\n---\\n');
             }""", kids_tags)
         else:
             # Barnes & Noble / Workshops - Expanded to capture all location markers
@@ -561,21 +580,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     return `EVENT_START\\nLOCATION_MARKER: ${loc}\\nCONTENT: ${i.innerText.substring(0, 1200)}\\nEVENT_END`;
                 }).join('\\n---\\n');
             }""")
-
-        # --- THE FALLBACK (Improved with safety) ---
-        if not combined_text or len(combined_text) < 500:
-            print(f"    ⚠️ Selective grab returned insufficient data. Attempting Segmented Fallback...")
-            combined_text = page.evaluate("""(tagList) => {
-                const sections = document.querySelectorAll('section, article, .event-list, li');
-                let found = [];
-                sections.forEach(s => {
-                    const txt = s.innerText;
-                    if (txt.length > 100 && tagList.some(t => txt.toLowerCase().includes(t.toLowerCase()))) {
-                        found.push(txt.substring(0, 1000));
-                    }
-                });
-                return found.slice(0, 40).join('\\n---\\n');
-            }""", kids_tags)
 
         # 5. The 90-Day Sliding Prompt
         # Force a shorter, stricter JSON structure to avoid "Delimiter" errors
