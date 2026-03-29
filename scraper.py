@@ -520,62 +520,61 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         ]
         if is_library:
             combined_text = page.evaluate("""(tagList) => {
-                const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item'];
-                let validEvents = [];
+                const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article'];
+                let eventData = [];
                 let seenTitles = new Set();
                 
                 cardSelectors.forEach(selector => {
                     document.querySelectorAll(selector).forEach(card => {
                         const titleEl = card.querySelector('h2, h3, .title, .cp-event-title');
                         const title = titleEl?.innerText.trim() || "Unknown";
-                        if (seenTitles.has(title)) return;
 
-                        // Identify TAG containers (Screen reader spans + Standard labels)
-                        const tagEls = card.querySelectorAll('.cp-screen-reader-message, [class*="screen-reader"], .sr-only, .cp-event-audience, .audience, .tags');
+                        // Identify TAG containers
+                        const tagEls = card.querySelectorAll('.cp-screen-reader-message, [class*="screen-reader"], .sr-only, .cp-event-audience, .audience, .tags, .cp-event-item-metadata');
                         let tagContext = "";
                         tagEls.forEach(s => tagContext += " " + s.innerText);
                         
                         const lowerContext = tagContext.toLowerCase();
                         const lowerTitle = title.toLowerCase();
 
-                        // Strict Metadata Inclusion: Tag MUST be in the tag elements or Title
+                        // Strict Metadata Inclusion
                         const hasKidTag = tagList.some(tag => {
                             const t = tag.toLowerCase();
                             return lowerContext.includes(t) || lowerTitle.includes(t);
                         });
 
-                        if (hasKidTag) {
+                        if (hasKidTag && !seenTitles.has(title)) {
                             seenTitles.add(title);
-                            validEvents.push(`TITLE: ${title}\\nVERIFIED_TAGS: ${tagContext}\\nBODY: ${card.innerText.substring(0, 1000)}`);
+                            eventData.push(`TITLE: ${title}\\nVERIFIED_TAGS: ${tagContext}\\nBODY: ${card.innerText.substring(0, 1000)}`);
                         }
                     });
                 });
-                return validEvents.join('\\n---\\n');
+                return eventData.join('\\n---\\n');
             }""", kids_tags)
         else:
-            # Barnes & Noble / Workshops - Logic remains the same
+            # Barnes & Noble / Workshops - Expanded to capture all location markers
             combined_text = page.evaluate("""() => {
-                const items = document.querySelectorAll('.event-card, .event-item, .bn-events-item, article');
-                return Array.from(items).map(i => `EVENT_START\\n${i.innerText.substring(0, 1000)}\\nEVENT_END`).join('\\n');
+                const items = document.querySelectorAll('.event-card, .event-item, .bn-events-item, article, [class*="event-item"]');
+                return Array.from(items).map(i => {
+                    // Look for location specific spans or classes
+                    const loc = i.querySelector('.event-location, .store-name, .venue')?.innerText || "";
+                    return `EVENT_START\\nLOCATION_MARKER: ${loc}\\nCONTENT: ${i.innerText.substring(0, 1200)}\\nEVENT_END`;
+                }).join('\\n---\\n');
             }""")
 
-        # --- THE FALLBACK (Re-introduced with safety) ---
+        # --- THE FALLBACK (Improved with safety) ---
         if not combined_text or len(combined_text) < 500:
-            print(f"    ⚠️ Card selectors failed. Attempting Tag-Filtered Global Fallback...")
-            # We only grab text from the page that is strictly related to our tag list
+            print(f"    ⚠️ Selective grab returned insufficient data. Attempting Segmented Fallback...")
             combined_text = page.evaluate("""(tagList) => {
-                const allElements = document.querySelectorAll('div, section, article, li');
-                let fallbackData = [];
-                allElements.forEach(el => {
-                    // Check if this specific element (not the whole body) contains a tag
-                    const txt = el.innerText;
-                    if (txt.length > 50 && txt.length < 1500) {
-                        if (tagList.some(t => txt.toLowerCase().includes(t.toLowerCase()))) {
-                            fallbackData.push(txt);
-                        }
+                const sections = document.querySelectorAll('section, article, .event-list, li');
+                let found = [];
+                sections.forEach(s => {
+                    const txt = s.innerText;
+                    if (txt.length > 100 && tagList.some(t => txt.toLowerCase().includes(t.toLowerCase()))) {
+                        found.push(txt.substring(0, 1000));
                     }
                 });
-                return fallbackData.slice(0, 50).join('\\n---\\n');
+                return found.slice(0, 40).join('\\n---\\n');
             }""", kids_tags)
 
         # 5. The 90-Day Sliding Prompt
