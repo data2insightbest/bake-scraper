@@ -131,8 +131,18 @@ def is_valid_date(date_str):
         
 # --- Business Logic & Saving ---
 import re
-from datetime import datetime, timedelta
+import json
+import time
+import random
+from datetime import datetime, timedelta, time as dt_time
+
 def save_events(events, target_branches, midnight, master, mode):
+    """
+    Saves events to Supabase. 
+    Restores the PRE-CLEAN session for performance while supporting branch-looping.
+    """
+    from __main__ import supabase, is_valid_date
+    
     m_id = master['id']
     m_name = master.get('name', 'Unknown')
     today = datetime.now().date()
@@ -147,13 +157,12 @@ def save_events(events, target_branches, midnight, master, mode):
         print(f"    ℹ️ No events extracted for {m_name}. Skipping save.")
         return
 
-    # Delete existing data for the 90-day future window for these specific branches
+    # 2. TARGETED CLEANUP 
+    # Delete existing data ONLY for the branches currently being processed
     branch_ids = [b['id'] for b in target_branches]
     limit_date = today + timedelta(days=90)
     if branch_ids:
-        print(f"    🧹 Refreshing 90-day window for {len(branch_ids)} branches of {m_name}...")
         try:
-            # Wrapped in try/except to prevent network timeouts from killing the whole script
             supabase.table("events").delete() \
                 .in_("place_id", branch_ids) \
                 .gte("event_date", today.isoformat()) \
@@ -161,14 +170,15 @@ def save_events(events, target_branches, midnight, master, mode):
                 .execute()
         except Exception as e:
             print(f"    ⚠️ Cleanup error (skipping delete): {e}")
-    # --- FLEXIBLE SCORING MAP ---
-    # Centralized weights for easy updates - No longer hardcoded in IF statements
+
+    # 3. SCORE WEIGHTS
     score_weights = [
         (10, ["festival", "fair", "exhibit", "performance", "concert", "parade", "celebration", "expo", "theater", "carnival", "show"]),
         (8, ["storytime", "story time", "lego", "maker", "craft", "lab", "workshop", "play", "science", "art", "steam", "stem", "construction", "diy", "paint", "build"]),
         (4, ["homework", "tutoring", "assistance", "esl", "citizenship", "help", "study", "exam", "test prep", "literacy", "reading buddies"])
     ]
-    # 4. PRE-CLEAN Branch Identities for faster matching
+
+    # 4. RESTORED PRE-CLEAN Session
     noise_pattern = r'library|branch|store|center|museum|main|county|system|[^a-z0-9\s]'
     processed_branches = []
     for b in target_branches:
@@ -187,7 +197,6 @@ def save_events(events, target_branches, midnight, master, mode):
             snippet = ev.get('snippet', '')
             found_loc = (ev.get('found_location') or ev.get('found_at') or "all").lower()
 
-        # Use our improved is_valid_date (no hard-coded 2024)        
         date_str = is_valid_date(r_date)
         if not date_str or r_date == 'UNKNOWN': 
             continue   
@@ -196,94 +205,57 @@ def save_events(events, target_branches, midnight, master, mode):
         except:
             continue
             
-        # --- IMPROVED HALLUCINATION FILTER ---
-        if ev_dt == today:
-            # If the snippet is generic or too short, it's likely a hallucination
-            # Otherwise, if it's a detailed description, keep it!
-            if "special program" in snippet.lower() or len(snippet) < 22:
-                continue
-        days_away = (ev_dt - today).days
-        
-        # --- YOUR 3 STRICT CATEGORIES ---
-        if days_away <= 14:
-            window = "Daily Refresh"
-        elif days_away <= 45:
-            window = "Weekly Deep Dive"
-        elif days_away <= 90:
-            window = "Special Scout"
-        else:
+        # Hallucination & Window Guards
+        if ev_dt == today and ("special program" in snippet.lower() or len(snippet) < 22):
             continue
+        
+        days_away = (ev_dt - today).days
+        if days_away < 0 or days_away > 90: continue
+        
+        window = "Daily Refresh" if days_away <= 14 else "Weekly Deep Dive" if days_away <= 45 else "Special Scout"
       
-        # --- JUNK & HALLUCINATION CLEANUP ---
+        # Junk Cleanup
         title_low = title.lower()
-        snippet_low = snippet.lower()
-         # 1. Skip AI Refusals / "No Internet" hallucinations
         if any(h in title_low for h in ["unable to", "no internet", "access the internet", "no events found", "sorry"]):
             continue
-            
-        # 2. Skip Logistical/Commercial Junk (Restored from your previous version)
-        junk_keywords = [
-            "incoming", "hours", "schedule", "admission", "closed", "private", 
-            "get started", "basics", "iphone", "ipad", "mac", "skills", 
-            "photo walk", "video walk"
-        ]
-        if any(j in title_low for j in junk_keywords):
+        
+        if any(j in title_low for j in ["incoming", "hours", "schedule", "admission", "closed", "private"]):
             continue
-        # 90-day Limit Guard
-        if days_away < 0 or days_away > 90: 
-            continue 
-            
-        # If Gemini quotes the prompt or returns a placeholder snippet
-        if "featured exhibit" in snippet.lower() or len(snippet) < 15:
-            snippet = f"Special program: {title} at {m_name}."
 
-        # --- CALCULATE SCORE USING REGEX ---
-        # 1. Normalize: strip symbols but keep spaces
-        clean_text_for_score = re.sub(r'[^a-z0-9\s]', ' ', f"{title_low} {snippet_low}")
-        # 2. Collapse multiple spaces into one to help regex matching
+        # Calculate Score
+        clean_text_for_score = re.sub(r'[^a-z0-9\s]', ' ', f"{title_low} {snippet.lower()}")
         clean_text_for_score = " ".join(clean_text_for_score.split())    
-        spec_score = 7  # THE DEFAULT  
+        spec_score = 7
         for score_val, keywords in score_weights:
-            # We escape keywords just in case, and use a simpler boundary check
-            # This ensures "story time" (with a space) matches correctly
             pattern = r'(^| )(' + '|'.join(map(re.escape, keywords)) + r')( |$)'     
             if re.search(pattern, clean_text_for_score):
                 spec_score = score_val
                 break
                 
-        # --- NEW: SEARCH BLOB FOR ACCURATE MAPPING ---
-        # Search title, snippet, and location field for branch keywords
+        # Identity Engine
         search_blob = f"{title_low} {snippet.lower()} {found_loc}"
         
-        for branch in target_branches:
+        for branch in processed_branches:
             should_save = False
+            
+            # Scenario A: Specific Mode (Looping branches via URL)
             if mode == "specific":
                 should_save = True
-            elif len(target_branches) == 1:
+            
+            # Scenario B: Global Mode (Single URL for multiple branches)
+            elif len(processed_branches) == 1:
                 should_save = True   
             else:
-                # --- NEW: IDENTITY MATCHING ---
-                # Find unique name (e.g. 'fremont') from 'Fremont Main Library'
-                noise_pattern = r'library|branch|store|center|museum|[^a-z0-9\s]'
-                branch_name_full = branch.get('name', '').lower()
-                clean_identity = re.sub(noise_pattern, '', branch_name_full).strip()
+                clean_id = branch["clean_identity"]
                 
-                # Rule 1: Specific identity exists in the text blob
-                if clean_identity and clean_identity in search_blob:
+                # Rule 1: Identity match
+                if clean_id and clean_id in search_blob:
                     should_save = True
-
-                # Rule 2: Handle 'all' or 'system-wide' keywords (FIXED FOR HARDWARE)
+                # Rule 2: System-wide (Home Depot / Slime Kitchen)
                 elif any(x in found_loc for x in ["all", "system", "multiple", "various"]):
-                    is_hybrid = any(h in m_name.lower() for h in ["home depot", "lowe", "slime"])
+                    is_hybrid = any(h in m_name.lower() for h in ["home depot", "lowe", "slime kitchen"])
                     if is_hybrid or spec_score >= 10:
                         should_save = True
-                    #else:
-                        # Keep blocking routine library events (Storytime/Homework) from 'all'
-                        #should_save = False
-                
-                # Rule 3: Direct location match
-                elif clean_identity in found_loc or found_loc in clean_identity:
-                    should_save = True
 
             if should_save:
                 entry = {
@@ -292,14 +264,14 @@ def save_events(events, target_branches, midnight, master, mode):
                     'title': title,
                     'event_date': date_str,
                     'snippet': snippet,
-                    'category_name': master.get('category_name') or master.get('category') or 'Special Activity',
+                    'category_name': master.get('category_name') or 'Special Activity',
                     'zip_code': branch.get('zip_code'),
                     'window_type': window,
-                    'specificity_score': spec_score, # Make sure this isn't hardcoded to 7!
+                    'specificity_score': spec_score,
                 }
                 
                 try:
-                    # Final Duplicate Check to prevent double-entries
+                    # Final Deduplication
                     existing = supabase.table("events").select("id") \
                         .eq("place_id", branch['id']) \
                         .eq("title", title) \
@@ -308,8 +280,12 @@ def save_events(events, target_branches, midnight, master, mode):
                     
                     if not existing.data:
                         supabase.table("events").insert(entry).execute()
+                        saved_count += 1
                 except Exception as e: 
                     print(f"      ⚠️ Database insert error: {e}")
+
+    if saved_count > 0:
+        print(f"    ✅ Saved {saved_count} entries for {m_name}")
 
 import time
 import json
@@ -725,54 +701,49 @@ def run_gemini_discovery(midnight):
         # Use ID 9999 to prevent collision with Academy of Sciences (ID 1)
         discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category": "Special Events"}
         save_events(events, [{"id": 9999, "name": "Bay Area Pop-up", "zip_code": "94103"}], midnight, discovery_master, "global")
-        
+
 def run_scraper():
+    """
+    Main orchestration function for the scraping pipeline.
+    """
+    from __main__ import supabase, get_daily_batch, run_gemini_discovery, scrape_and_save_1, scrape_and_save_2, get_hybrid_retail_events
+    from playwright.sync_api import sync_playwright
+
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
     masters = get_daily_batch(limit=24)
     if not masters: return
 
     with sync_playwright() as p:
-        # Using a standard desktop user agent often helps with ID 3 & 5 blocks
+        # Using a standard desktop user agent often helps with block detection
         browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
         DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
+        
         for m in masters:
-            # Mark as scraped immediately
-            # supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
-            
             # Fetch affiliated branches
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches:
-                branches = [m] # This is vital for single-location sites like Academy!
+                branches = [m] # Essential for single-location sites
             
-           # name_low = m['name'].lower().replace("’", "'")
-           # category_low = (m.get('category_name') or "").lower() # Ensure this matches your column name
-           
-           # Use .get() and a fallback "" for BOTH name and category
             name_raw = m.get('name') or "Unknown Place"
             name_low = name_raw.lower().replace("’", "'")
-            category_raw = m.get('category_name') or ""
-            category_low = category_raw.lower()
 
             # 1. HYBRID RETAIL (Home Depot/Lowes)
             is_hd = "home depot" in name_low
             is_lowes = "lowe's" in name_low or "lowes" in name_low
             if is_hd or is_lowes:
                 print(f"🛡️ Hybrid: {m['name']}")
-                # Pass the raw name to your existing working function
                 save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m, "global")
-                continue # Skip standard scraping
+                continue 
     
             # 2. SPECIFIC BRANCH SCRAPING (Lego/Barnes/Slime)
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
                 print(f"🔍 Dynamic: {m['name']}")
                 if "barnes" in name_low:
-                    # B&N requires individual zip code searches
                     for branch in branches:
                         time.sleep(random.uniform(2.0, 4.0))
                         scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
                 else:
-                    # Slime and Lego: Scrape once, map to all branches in one go
                     time.sleep(random.uniform(3.0, 5.0))
                     scrape_and_save_1(context, m, branches, "mapping", midnight_today)
             
@@ -782,13 +753,14 @@ def run_scraper():
                 time.sleep(random.uniform(2.0, 4.0))
                 scrape_and_save_1(context, m, branches, "mapping", midnight_today)
 
-            # 4. UNIVERSAL / MUSEUM SITES (the non-workshop category)
+            # 4. UNIVERSAL / MUSEUM SITES
             else:
                 print(f"🌐 Universal/Museum Scrape (Type 2): {m['name']}")
                 scrape_and_save_2(context, m, branches, "global", midnight_today)
             
         browser.close()
-    # Run the AI discovery for events with missing descriptions
+
+    # Run AI discovery for events with missing descriptions
     run_gemini_discovery(midnight_today)
     
 if __name__ == "__main__":
