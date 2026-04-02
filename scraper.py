@@ -429,204 +429,206 @@ def get_daily_batch(limit=24):
 #    return res.data
        
 # --- Scraper Pathway --- this function works for the category of workshop, but not others
+import re
+import json
+import time
+from datetime import datetime, timedelta
+
 def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code=None):
-    page = context.new_page()
-    page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    
-    url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
+    """
+    Handles both global systems (Library) and store-specific systems (B&N, LEGO).
+    Optimized for free-tier API usage with increased spacing and branch-level precision.
+    """
     m_name = master.get('name', 'Unknown')
     is_library = "library" in m_name.lower()
+    is_bookstore = "barnes" in m_name.lower()
+    is_lego = "lego" in m_name.lower()
+    
+    url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
     today = datetime.now()
     future_date = today + timedelta(days=90)
     range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
-    
-    try:
-        # 1. Navigation with 'networkidle' to catch initial API calls
-        page.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.google.com/",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Upgrade-Insecure-Requests": "1"
-        }) 
+
+    # Determine if we need to loop through branches (Specific Store Pickers) or scrape once (Global)
+    # If mode is 'specific' (B&N/LEGO), we process one branch at a time.
+    branches_to_process = target_branches if (mode == "specific" and (is_bookstore or is_lego)) else [None]
+
+    for current_branch in branches_to_process:
+        page = context.new_page()
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
+        # Use branch-specific zip if looping, otherwise use the passed zip_code
+        active_zip = current_branch.get('zip_code') if current_branch else zip_code
+        active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
+
         try:
-            print(f"   🌐 Navigating to {m_name}...")
+            # 1. Navigation Setup
+            page.set_extra_http_headers({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.google.com/",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Upgrade-Insecure-Requests": "1"
+            }) 
+
+            print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
             page.goto(url, wait_until="load", timeout=60000)
             page.wait_for_timeout(5000) 
+            
             try:
                 page.wait_for_load_state("networkidle", timeout=15000)
             except:
-                print(f"   ⚠️ Network busy for {master['name']}, moving to scrape anyway.")
-        except Exception as e:
-            print(f"   ❌ Fatal navigation error for {master['name']}: {e}")
-            return # Exit this master if we can't even load the page
-      
-        if mode == "specific" and zip_code:
-            try:
-                search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
-                search_field.wait_for(state="visible", timeout=10000)
-                search_field.fill(str(zip_code))
-                page.keyboard.press("Enter")
-                time.sleep(12) 
-            except: pass
-        
-        if mode != "specific":
-            # 2. UNIVERSAL FIX: Exhaustive Scroll
-            # We scroll to the very bottom in small increments to trigger 'Lazy Loading' cards
-            print(f"   🖱️ Scrolling {master['name']} to trigger lazy-load...")
-            for _ in range(8):
-                page.mouse.wheel(0, 2000)
-                time.sleep(2.5) # Wait for the 'spinning wheel' to finish loading data
-            # --- ADD THE EXTRA STEP HERE ---
-            print(f"   🔘 Checking for 'Load More' buttons...")
-            for i in range(5):
+                print(f"    ⚠️ Network busy for {active_branch_name}, moving to scrape anyway.")
+
+            # 2. STORE SELECTION LOGIC (For B&N/LEGO)
+            if mode == "specific" and active_zip:
                 try:
-                # This looks for buttons containing "Load More", "View More", etc.
-                    load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more|see more", re.I))
-                    if load_more.is_visible():
-                        load_more.click()
-                        print(f"   ✅ Clicked 'Load More' for {master['name']}")
-                        time.sleep(4) # Wait for the new content to pop in
-                    else: 
-                        break
-                except:
-                    break # No button found, which is fine          
-        # 3. DEBUG & CAPTURE (Restoring Screenshot & Cleanup)
-        print(f"    📸 Capturing debug state and cleaning data...")
-        time.sleep(5) 
-        # Create a safe filename for the screenshot
-        safe_name = re.sub(r'\W+', '', m_name)
-        page.screenshot(path=f"debug_{safe_name}.png")      
+                    # Generic picker logic for B&N/LEGO
+                    search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i], #storeSearchInput").first
+                    search_field.wait_for(state="visible", timeout=10000)
+                    search_field.fill(str(active_zip))
+                    page.keyboard.press("Enter")
+                    
+                    # Wait for results and select 'Make this my store' if button exists
+                    time.sleep(5)
+                    select_btn = page.locator("text='Make This My Store', text='Select This Store', .btn-make-my-store").first
+                    if select_btn.is_visible():
+                        select_btn.click()
+                        time.sleep(8) # Wait for preference to save and page to reload
+                except Exception as e:
+                    print(f"    ⚠️ Store selection skipped for {active_branch_name}: {e}")
 
-        # 4. CAPTURE & CLEAN DATA (Stealth + HTML Fallback)
-        print(f"    🧹 Cleaning HTML and extracting text...")
-
-        # Get Raw and Clean HTML first as the broad safety net
-        raw_html = page.content()
-        clean_html_text = re.sub(r'<(script|style|meta|link|svg|path|footer|nav|header)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
-        clean_html_text = re.sub(r'<[^>]+>', ' ', clean_html_text)
-        clean_html_text = re.sub(r'\s+', ' ', clean_html_text).strip()
-        print(f"    🧹 Extracting content for {m_name}...") 
-        combined_text = ""
-       
-        # SEPARATED LOGIC FOR LIBRARIES VS WORKSHOPS
-        kids_tags = [
-            "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
-            "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
-            "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", 
-            "Preschoolers (3-5 yrs)", "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", 
-            "Preschool", "Family Friendly", "Teens", "School Age", "Baby/Toddler", "Early Childhood", 
-            "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
-        ]
-        if is_library:
-            combined_text = page.evaluate("""(tagList) => {
-                const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article'];
-                let eventData = [];
-                let seenTitles = new Set();
+            # 3. SCROLLING & LOADING (For Global/Library)
+            if mode != "specific":
+                print(f"    🖱️ Scrolling {m_name} to trigger lazy-load...")
+                for _ in range(8):
+                    page.mouse.wheel(0, 2000)
+                    time.sleep(2.5) 
                 
-                // --- ATTEMPT 1: Selective Card-Based Grab ---
-                cardSelectors.forEach(selector => {
-                    document.querySelectorAll(selector).forEach(card => {
-                        const titleEl = card.querySelector('h2, h3, .title, .cp-event-title');
-                        const title = titleEl?.innerText.trim() || "Unknown";
+                print(f"    🔘 Checking for 'Load More' buttons...")
+                for i in range(5):
+                    try:
+                        load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more|see more", re.I))
+                        if load_more.is_visible():
+                            load_more.click()
+                            time.sleep(4)
+                        else: break
+                    except: break
 
-                        // Identify TAG containers
-                        const tagEls = card.querySelectorAll('.cp-screen-reader-message, [class*="screen-reader"], .sr-only, .cp-event-audience, .audience, .tags, .cp-event-item-metadata');
-                        let tagContext = "";
-                        tagEls.forEach(s => tagContext += " " + s.innerText);
-                        
-                        const lowerContext = tagContext.toLowerCase();
-                        const lowerTitle = title.toLowerCase();
+            # 4. CAPTURE & CLEAN DATA
+            print(f"    📸 Capturing debug state and cleaning data...")
+            time.sleep(2) 
+            safe_name = re.sub(r'\W+', '', f"{m_name}_{active_branch_name}")
+            page.screenshot(path=f"debug_{safe_name}.png")      
 
-                        // Strict Metadata Inclusion
-                        const hasKidTag = tagList.some(tag => {
-                            const t = tag.toLowerCase();
-                            return lowerContext.includes(t) || lowerTitle.includes(t);
-                        });
+            raw_html = page.content()
+            clean_html_text = re.sub(r'<(script|style|meta|link|svg|path|footer|nav|header)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
+            clean_html_text = re.sub(r'<[^>]+>', ' ', clean_html_text)
+            clean_html_text = re.sub(r'\s+', ' ', clean_html_text).strip()
+            
+            combined_text = ""
+            kids_tags = [
+                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
+                "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
+                "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", 
+                "Preschoolers (3-5 yrs)", "Teens (12-18 yrs)", "Toddlers (1-3 yrs)", "Tweens (9-12 yrs)", 
+                "Preschool", "Family Friendly", "Teens", "School Age", "Baby/Toddler", "Early Childhood", 
+                "Elementary School Age", "Family", "Middle School Age", "Teen", "Baby – Preschool", "Children"
+            ]
 
-                        if (hasKidTag && !seenTitles.has(title)) {
-                            seenTitles.add(title);
-                            eventData.push(`TITLE: ${title}\\nVERIFIED_TAGS: ${tagContext}\\nBODY: ${card.innerText.substring(0, 1000)}`);
-                        }
-                    });
-                });
-
-                // --- ATTEMPT 2: Recursive Recursive Fallback (Only if Attempt 1 fails) ---
-                if (eventData.length === 0) {
-                    // Deep scan every meaningful container on the page
-                    const elements = document.querySelectorAll('div, section, li');
-                    elements.forEach(el => {
-                        const txt = el.innerText;
-                        // Avoid grabbing the entire page at once; look for specific event-sized chunks
-                        if (txt.length > 100 && txt.length < 1500) {
-                            // Only include if it strictly contains one of the tags
-                            const hasTag = tagList.some(t => txt.toLowerCase().includes(t.toLowerCase()));
-                            if (hasTag) {
-                                eventData.push(`[RECURSIVE_MATCH]\\nCONTENT: ${txt}`);
+            if is_library:
+                combined_text = page.evaluate("""(tagList) => {
+                    const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article'];
+                    let eventData = [];
+                    let seenTitles = new Set();
+                    
+                    cardSelectors.forEach(selector => {
+                        document.querySelectorAll(selector).forEach(card => {
+                            const titleEl = card.querySelector('h2, h3, .title, .cp-event-title');
+                            const title = titleEl?.innerText.trim() || "Unknown";
+                            const tagEls = card.querySelectorAll('.cp-screen-reader-message, [class*="screen-reader"], .sr-only, .cp-event-audience, .audience, .tags, .cp-event-item-metadata');
+                            let tagContext = "";
+                            tagEls.forEach(s => tagContext += " " + s.innerText);
+                            const lowerContext = tagContext.toLowerCase();
+                            const lowerTitle = title.toLowerCase();
+                            const hasKidTag = tagList.some(tag => {
+                                const t = tag.toLowerCase();
+                                return lowerContext.includes(t) || lowerTitle.includes(t);
+                            });
+                            if (hasKidTag && !seenTitles.has(title)) {
+                                seenTitles.add(title);
+                                eventData.push(`TITLE: ${title}\\nVERIFIED_TAGS: ${tagContext}\\nBODY: ${card.innerText.substring(0, 1000)}`);
                             }
-                        }
+                        });
                     });
-                }
-
-                return eventData.slice(0, 60).join('\\n---\\n');
-            }""", kids_tags)
-        else:
-            # Barnes & Noble / Workshops - Expanded to capture all location markers
-            combined_text = page.evaluate("""() => {
-                const items = document.querySelectorAll('.event-card, .event-item, .bn-events-item, article, [class*="event-item"]');
-                return Array.from(items).map(i => {
-                    // Look for location specific spans or classes
-                    const loc = i.querySelector('.event-location, .store-name, .venue')?.innerText || "";
-                    return `EVENT_START\\nLOCATION_MARKER: ${loc}\\nCONTENT: ${i.innerText.substring(0, 1200)}\\nEVENT_END`;
-                }).join('\\n---\\n');
-            }""")
-
-        # 5. The 90-Day Sliding Prompt
-        # Force a shorter, stricter JSON structure to avoid "Delimiter" errors
-        prompt = f"""
-        Extract events at {master['name']} from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
-        Rules:
-        1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}]. No intro text, no markdown backticks, and no summary at the end.
-        2. DATE RULE: You must find the specific date. If the text says 'Every Monday', calculate the next 3 Mondays starting after {today.strftime('%B %d, %Y')}. 
-           IMPORTANT: If NO specific date is found, use 'UNKNOWN' for event_date. DO NOT use today's date ({today.strftime('%Y-%m-%d')}) as a fallback.
-           DATE EXPANSION: For recurring events like "Homework Help" or "Storytime" (e.g., 'Every Monday' or 'Mon-Thu'), you MUST generate a separate JSON object for EVERY SINGLE DATE for the next 90 days.
-           DO NOT summarize. I need individual entries to fill the calendar.
-        3. Snippet must be 1 sentence describing the activity under 20 words.
-        4. If no events found, return [].
-        5. IDENTIFY AGE GROUP: Look for tags like 'Babies & Toddler', 'Kids', 'Teens', 'Preschoolers', 'Teens (13 to 18 years)', 'Children (6 to 9 years)', 'Preschoolers (3-5 years)', 'Tweens (9 to 12 years)', 'Toddlers (1 to 3 years)', 'Kids (5-9 yrs)', 'Babies (0-1 yrs)', 'Families', 'Preschoolers (3-5 yrs)', 'Teens (12-18 yrs)', 'Toddlers (1-3 yrs)', 'Tweens (9-12 yrs)', 'Preschool', 'Family Friendly', 'Teens', 'School Age', 'Baby/Toddler', 'Early Childhood', 'Elementary School Age', 'Family', 'Middle School Age', 'Teen', 'Baby – Preschool', 'Children'
-        6. CONTEXT: If the text looks like a list of store names without times, ignore them. Only extract items that have a TITLE and a specific DATE.
-        7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
-        8. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
-        9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Do not omit the branch name. Search the entire text, including headers and descriptions. If the text says 'In Store [Location]', use that location. NO SUMMARIES: Do not combine events from different branches into a single "All Locations" entry. If the same activity happens at different branches, return exact the same number of separate JSON objects. LOCATION EXTRACTION: Check descriptions and metadata carefully for branch names. NEVER use 'All Locations', 'System-wide', or 'Multiple'. If a specific branch name is not found in the text, skip the event. 'found_location' must contain ONLY the specific branch name (e.g., 'Castro Valley').
-        10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
-        11. Extract as many events as possible (up to 25). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object. If you reach your token limit, STOP and close the JSON array `]` properly. Never leave a JSON object hanging open.
-        12. Output JSON list with these EXACT keys: ["title", "event_date" (YYYY-MM-DD), "snippet", "found_location"].
-        Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
-        IMPORTANT: Use the date format YYYY-MM-DD. If year is missing in text, assume {today.year}.
-        """
-        events = generate_with_retry(prompt, combined_text, master['name'])
-
-        if events:
-            # Secondary check to ensure no "Adult" events slipped through the AI
-            exclude_list = ["adult", "senior", "tax prep", "citizenship test"]
-            filtered_events = []
-            for ev in events:
-                check_text = (ev.get('title', '') + " " + ev.get('snippet', '')).lower()
-                if not any(word in check_text for word in exclude_list) or "family" in check_text:
-                    filtered_events.append(ev)
-            
-            if filtered_events:
-                save_events(filtered_events, target_branches, midnight, master, mode)
-                print(f"    ✅ Successfully found {len(filtered_events)} kid-friendly events for {master['name']}.")
+                    if (eventData.length === 0) {
+                        const elements = document.querySelectorAll('div, section, li');
+                        elements.forEach(el => {
+                            const txt = el.innerText;
+                            if (txt.length > 100 && txt.length < 1500) {
+                                const hasTag = tagList.some(t => txt.toLowerCase().includes(t.toLowerCase()));
+                                if (hasTag) { eventData.push(`[RECURSIVE_MATCH]\\nCONTENT: ${txt}`); }
+                            }
+                        });
+                    }
+                    return eventData.slice(0, 60).join('\\n---\\n');
+                }""", kids_tags)
             else:
-                print(f"    ⚠️ All found events were filtered out as non-kid-friendly.")
-        else:
-            print(f"    ⚠️ Gemini found 0 events for {master['name']} in the {range_str} window.")
-            
-    except Exception as e:
-        print(f"❌ Error scraping {master['name']}: {e}")
-    finally:
-        page.close()
+                combined_text = page.evaluate("""() => {
+                    const items = document.querySelectorAll('.event-card, .event-item, .bn-events-item, article, [class*="event-item"]');
+                    return Array.from(items).map(i => {
+                        const loc = i.querySelector('.event-location, .store-name, .venue')?.innerText || "";
+                        return `EVENT_START\\nLOCATION_MARKER: ${loc}\\nCONTENT: ${i.innerText.substring(0, 1200)}\\nEVENT_END`;
+                    }).join('\\n---\\n');
+                }""")
+
+            # 5. THE PROMPT
+            prompt = f"""
+            Extract events at {master['name']} ({active_branch_name}) from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
+            Rules:
+            1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}].
+            2. DATE RULE: If the text says 'Every Monday', calculate the next 3 Mondays starting after {today.strftime('%B %d, %Y')}. 
+               DATE EXPANSION: For recurring events like "Storytime", generate a separate JSON object for EVERY SINGLE DATE for the next 90 days.
+            3. Snippet: 1 sentence, under 20 words.
+            4. If no events found, return [].
+            5. AGE TAGS: {", ".join(kids_tags[:10])}...
+            6. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults). EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
+            7. LOCATION: MUST identify specific branch. Current Branch Context: {active_branch_name}. 
+               If the event is branch-specific, use '{active_branch_name}' for 'found_location'. 
+               NEVER use 'All Locations'. Skip if no branch identified.
+            8. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
+            9. MAX EVENTS: Up to 25. Ensure JSON is valid and closed.
+            """
+
+            # 5. IDENTIFY AGE GROUP: Look for tags like 'Babies & Toddler', 'Kids', 'Teens', 'Preschoolers', 'Teens (13 to 18 years)', 'Children (6 to 9 years)', 'Preschoolers (3-5 years)', 'Tweens (9 to 12 years)', 'Toddlers (1 to 3 years)', 'Kids (5-9 yrs)', 'Babies (0-1 yrs)', 'Families', 'Preschoolers (3-5 yrs)', 'Teens (12-18 yrs)', 'Toddlers (1-3 yrs)', 'Tweens (9-12 yrs)', 'Preschool', 'Family Friendly', 'Teens', 'School Age', 'Baby/Toddler', 'Early Childhood', 'Elementary School Age', 'Family', 'Middle School Age', 'Teen', 'Baby – Preschool', 'Children'
+            from scraper_utils import generate_with_retry, save_events
+            events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")
+
+            if events:
+                exclude_list = ["adult", "senior", "tax prep", "citizenship test"]
+                filtered_events = [
+                    ev for ev in events 
+                    if not any(word in (ev.get('title', '') + " " + ev.get('snippet', '')).lower() for word in exclude_list) 
+                    or "family" in (ev.get('title', '') + " " + ev.get('snippet', '')).lower()
+                ]
+                
+                if filtered_events:
+                    # Pass only the current branch if looping, otherwise pass all
+                    targets = [current_branch] if current_branch else target_branches
+                    save_events(filtered_events, targets, midnight, master, mode)
+                    print(f"    ✅ Successfully found {len(filtered_events)} events for {active_branch_name}.")
+            else:
+                print(f"    ⚠️ Gemini found 0 events for {active_branch_name} in the {range_str} window.")
+
+            # RATE LIMIT PROTECTION: Wait 15s between branches to keep API use free/stable
+            if current_branch != branches_to_process[-1]:
+                print(f"    ⏳ Spacing out requests (15s)...")
+                time.sleep(15)
+
+        except Exception as e:
+            print(f"❌ Error scraping {m_name} - {active_branch_name}: {e}")
+        finally:
+            page.close()
 
 import random
 def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code=None):
