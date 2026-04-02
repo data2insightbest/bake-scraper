@@ -23,10 +23,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install google-genai supabase beautifulsoup4 requests playwright
 
-      - name: Install Playwright Chromium
-        # 'install --with-deps' is the magic line that prevents "Executable not found" errors
-        run: npx playwright install chromium --with-deps
-
+      - name: Install Playwright Browsers
+        run: |
+          pip install playwright
+          playwright install chromium --with-deps
+          
       - name: Run BAKE Scraper
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
