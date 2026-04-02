@@ -598,7 +598,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults).
         8. EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
         9. LOCATION: Identify which specific branch the event is at. You MUST identify the specific branch name (e.g., 'Albany' or 'Fremont'). Do not omit the branch name. Search the entire text, including headers and descriptions. If the text says 'In Store [Location]', use that location. NO SUMMARIES: Do not combine events from different branches into a single "All Locations" entry. If the same activity happens at different branches, return exact the same number of separate JSON objects. LOCATION EXTRACTION: Check descriptions and metadata carefully for branch names. NEVER use 'All Locations', 'System-wide', or 'Multiple'. If a specific branch name is not found in the text, skip the event. 'found_location' must contain ONLY the specific branch name (e.g., 'Castro Valley').
-        10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
         11. Extract as many events as possible (up to 25). CRITICAL: Ensure the JSON remains valid and every object is closed correctly. If you approach your output limit, stop after a complete object. If you reach your token limit, STOP and close the JSON array `]` properly. Never leave a JSON object hanging open.
         12. Output JSON list with these EXACT keys: ["title", "event_date" (YYYY-MM-DD), "snippet", "found_location"].
         Rule: If an event is ambiguous, ask: "Is this for a parent to bring a child to?" If No, ignore it.
@@ -606,6 +605,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         """
         events = generate_with_retry(prompt, combined_text, master['name'])
 
+        #10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
         if events:
             # Secondary check to ensure no "Adult" events slipped through the AI
             exclude_list = ["adult", "senior", "tax prep", "citizenship test"]
