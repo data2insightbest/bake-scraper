@@ -438,10 +438,18 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
  
         current_url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
-        if is_bookstore and active_zip:
-            # CHANGE: Directly injecting the zip into the search URL to skip the homepage search modal
-            current_url = f"https://stores.barnesandnoble.com/search?searchTerm={active_zip}&view=list"
-           
+        if is_bookstore:
+            # 1. ATTEMPT DIRECT INJECTION (Best: Store ID)
+            # If your branch data has 'external_id' (e.g. 2927), we go straight to the events list
+            store_id = current_branch.get('external_id') if current_branch else None
+            if store_id:
+                current_url = f"https://stores.barnesandnoble.com/store/{store_id}?view=list&type=event"
+                print(f"    🚀 STRATEGY: Direct ID Injection for {active_branch_name}")
+            # 2. FALLBACK TO SEARCH INJECTION (Better than home page)
+            elif active_zip:
+                current_url = f"https://stores.barnesandnoble.com/search?searchTerm={active_zip}&view=list"
+                print(f"    🚀 STRATEGY: Search Parameter Injection for {active_zip}")
+      
         try:
              # 1. Navigation Setup
             page.set_extra_http_headers({
@@ -460,40 +468,44 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
             if mode == "specific" and active_zip:
                 try:
-                    # --- MODIFIED B&N SPECIFIC NAVIGATION ---
                     if is_bookstore:
-                        print(f"    🖱️ Locating 'Store Events' for {active_branch_name}...")
-                        
-                        # --- MODIFIED: Fuzzy matching for branch names (e.g., extracting 'Emeryville' from 'B&N - Emeryville') ---
-                        clean_branch = active_branch_name.split('-')[-1].strip()
-                        branch_card = page.locator(f"div.store-info-container, .store-card-details").filter(has_text=clean_branch).first
-                        
-                        if branch_card.is_visible(timeout=7000):
-                            events_link = branch_card.locator("a:has-text('Store Events'), a[href*='/events/']").first
-                            
-                            # --- MODIFIED: Scroll into view to ensure link is interactable ---
-                            events_link.scroll_into_view_if_needed()
-                            page.wait_for_timeout(1000)
-
-                            if events_link.is_visible():
-                                events_link.click()
-                                print(f"    ✅ Clicked 'Store Events' for {active_branch_name}")
-                                time.sleep(12) 
-                            else:
-                                raise Exception("Events link not found within specific branch card")
+                        # If we injected the ID, we are already on the events page
+                        if "type=event" in page.url:
+                            print(f"    ✨ Already at destination via Direct Injection.")
                         else:
-                            # Fallback to general events link if specific branch card isn't found
-                            print(f"    ⚠️ Branch card for '{clean_branch}' not visible, trying global fallback...")
-                            events_link = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
-                            if events_link.is_visible(timeout=5000):
-                                events_link.click()
-                                time.sleep(12)
+                            print(f"    🖱️ Locating 'Store Events' for {active_branch_name}...")
+                            
+                            # Use regex for fuzzy branch matching
+                            clean_branch = active_branch_name.split('-')[-1].strip()
+                            branch_card = page.locator(f"div.store-info-container, .store-card-details").filter(has_text=re.compile(clean_branch, re.I)).first
+                            
+                            if branch_card.is_visible(timeout=7000):
+                                events_link = branch_card.locator("a:has-text('Store Events'), a[href*='/events/']").first
+                                
+                                # --- STRATEGY: FORCE INTERACTION ---
+                                events_link.scroll_into_view_if_needed()
+                                page.wait_for_timeout(1000)
+
+                                if events_link.is_visible():
+                                    # Using force=True to bypass potential invisible overlays (cookie banners)
+                                    events_link.click(force=True)
+                                    print(f"    ✅ Force-Clicked 'Store Events' for {active_branch_name}")
+                                    page.wait_for_load_state("networkidle", timeout=15000)
+                                    time.sleep(5) 
+                                else:
+                                    raise Exception("Events link not found within specific branch card")
                             else:
-                                print(f"    ⚠️ 'Store Events' button not found.")
-                    # --- END B&N SPECIFIC NAVIGATION ---
+                                # Fallback to general events link
+                                print(f"    ⚠️ Branch card for '{clean_branch}' not visible, trying global fallback...")
+                                events_link = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
+                                if events_link.is_visible(timeout=5000):
+                                    events_link.click(force=True)
+                                    time.sleep(10)
+                                else:
+                                    print(f"    ⚠️ 'Store Events' button not found.")
                     
                     elif not is_bookstore:
-                        # LEGO Logic (Untouched)
+                        # LEGO Logic
                         search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
                         if search_field.is_visible(timeout=5000):
                             search_field.fill(str(active_zip))
@@ -501,7 +513,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             time.sleep(5)
                             select_btn = page.locator("text='Select This Store', button:has-text('Store Details')").first
                             if select_btn.is_visible(timeout=5000):
-                                select_btn.click()
+                                select_btn.click(force=True)
                                 time.sleep(8)
 
                 except Exception as e:
