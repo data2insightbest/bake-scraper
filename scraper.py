@@ -455,7 +455,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
             # CHANGE: Use 'commit' instead of 'load' for B&N to avoid protocol errors from heavy tracking scripts
             page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(5000) 
+            page.wait_for_timeout(7000) 
            
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
             if mode == "specific" and active_zip:
@@ -464,29 +464,36 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     if is_bookstore:
                         print(f"    🖱️ Locating 'Store Events' for {active_branch_name}...")
                         
-                        # CHANGE: Improved selector that targets the specific branch card in the search list
-                        # This ensures we click the "Events" for the correct location if multiple results appear
-                        branch_card_selector = f"div.store-info-container:has-text('{active_branch_name}')"
-                        events_link = page.locator(f"{branch_card_selector} a:has-text('Store Events')").first
+                        # --- MODIFIED: Fuzzy matching for branch names (e.g., extracting 'Emeryville' from 'B&N - Emeryville') ---
+                        clean_branch = active_branch_name.split('-')[-1].strip()
+                        branch_card = page.locator(f"div.store-info-container, .store-card-details").filter(has_text=clean_branch).first
                         
-                        if not events_link.is_visible():
-                            # Fallback to general events link if specific branch card layout differs
-                            events_link = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
-                        
-                        if events_link.is_visible(timeout=10000):
-                            events_link.click()
-                            # CHANGE: Extended wait for B&N's slow JS-rendered calendars
-                            time.sleep(12) 
+                        if branch_card.is_visible(timeout=7000):
+                            events_link = branch_card.locator("a:has-text('Store Events'), a[href*='/events/']").first
+                            
+                            # --- MODIFIED: Scroll into view to ensure link is interactable ---
+                            events_link.scroll_into_view_if_needed()
+                            page.wait_for_timeout(1000)
+
+                            if events_link.is_visible():
+                                events_link.click()
+                                print(f"    ✅ Clicked 'Store Events' for {active_branch_name}")
+                                time.sleep(12) 
+                            else:
+                                raise Exception("Events link not found within specific branch card")
                         else:
-                            print(f"    ⚠️ 'Store Events' button not found, checking for alternative event links...")
-                            alt_events = page.locator(".store-events-link, [href*='event']").first
-                            if alt_events.is_visible():
-                                alt_events.click()
-                                time.sleep(10)
+                            # Fallback to general events link if specific branch card isn't found
+                            print(f"    ⚠️ Branch card for '{clean_branch}' not visible, trying global fallback...")
+                            events_link = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
+                            if events_link.is_visible(timeout=5000):
+                                events_link.click()
+                                time.sleep(12)
+                            else:
+                                print(f"    ⚠️ 'Store Events' button not found.")
                     # --- END B&N SPECIFIC NAVIGATION ---
                     
                     elif not is_bookstore:
-                        # LEGO Logic (Untouched as requested)
+                        # LEGO Logic (Untouched)
                         search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
                         if search_field.is_visible(timeout=5000):
                             search_field.fill(str(active_zip))
