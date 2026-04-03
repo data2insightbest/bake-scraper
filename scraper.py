@@ -436,13 +436,12 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         # Use branch-specific zip if looping, otherwise use the passed zip_code
         active_zip = current_branch.get('zip_code') if current_branch else zip_code
         active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
-
-        # B&N URL Injection: We now inject the searchTerm directly to bypass the menu-driven search which often fails
+ 
         current_url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
         if is_bookstore and active_zip:
-            # HIGHLIGHT: Changed to a more direct search results URL to avoid manual interaction with the search field
+            # CHANGE: Directly injecting the zip into the search URL to skip the homepage search modal
             current_url = f"https://stores.barnesandnoble.com/search?searchTerm={active_zip}&view=list"
-            
+           
         try:
              # 1. Navigation Setup
             page.set_extra_http_headers({
@@ -461,20 +460,24 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
             if mode == "specific" and active_zip:
                 try:
-                    # --- START B&N SPECIFIC NAVIGATION ---
+                    # --- MODIFIED B&N SPECIFIC NAVIGATION ---
                     if is_bookstore:
-                        # HIGHLIGHT: Since we used a direct URL, we only need to find the specific "Store Events" link
                         print(f"    🖱️ Locating 'Store Events' for {active_branch_name}...")
                         
-                        # Use a more robust selector that targets the link within the search results
-                        events_btn = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
+                        # CHANGE: Improved selector that targets the specific branch card in the search list
+                        # This ensures we click the "Events" for the correct location if multiple results appear
+                        branch_card_selector = f"div.store-info-container:has-text('{active_branch_name}')"
+                        events_link = page.locator(f"{branch_card_selector} a:has-text('Store Events')").first
                         
-                        if events_btn.is_visible(timeout=10000):
-                            events_btn.click()
-                            # HIGHLIGHT: Increased timeout to 12s as B&N calendars are very slow to populate via JS
+                        if not events_link.is_visible():
+                            # Fallback to general events link if specific branch card layout differs
+                            events_link = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
+                        
+                        if events_link.is_visible(timeout=10000):
+                            events_link.click()
+                            # CHANGE: Extended wait for B&N's slow JS-rendered calendars
                             time.sleep(12) 
                         else:
-                            # Fallback: if not visible, try to refresh or look for generic "Events"
                             print(f"    ⚠️ 'Store Events' button not found, checking for alternative event links...")
                             alt_events = page.locator(".store-events-link, [href*='event']").first
                             if alt_events.is_visible():
@@ -483,7 +486,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     # --- END B&N SPECIFIC NAVIGATION ---
                     
                     elif not is_bookstore:
-                        # Legacy/LEGO logic
+                        # LEGO Logic (Untouched as requested)
                         search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
                         if search_field.is_visible(timeout=5000):
                             search_field.fill(str(active_zip))
