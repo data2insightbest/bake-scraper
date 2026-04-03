@@ -432,28 +432,30 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     for current_branch in branches_to_process:
         page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
+      
         # Use branch-specific zip if looping, otherwise use the passed zip_code
         active_zip = current_branch.get('zip_code') if current_branch else zip_code
         active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
 
         # B&N URL Injection: For bookstores, we start at the homepage to trigger the session
-        current_url = url
-        if is_bookstore:
-            current_url = "https://www.barnesandnoble.com/"
+        current_url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
+        if is_bookstore and active_zip:
+            current_url = f"https://stores.barnesandnoble.com/search?searchTerm={active_zip}&view=list"
             
         try:
-            # 1. Navigation Setup
+             # 1. Navigation Setup
             page.set_extra_http_headers({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.google.com/",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
                 "Upgrade-Insecure-Requests": "1"
             }) 
-
+                   
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
-            page.goto(current_url, wait_until="load", timeout=60000)
+
+            # CHANGE: Use 'commit' instead of 'load' for B&N to avoid protocol errors from heavy tracking scripts
+            wait_strategy = "commit" if is_bookstore else "load"
+            page.goto(current_url, wait_until=wait_strategy, timeout=60000)
             page.wait_for_timeout(7000) 
             
             try:
@@ -586,6 +588,10 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 }""")
 
             # 5. THE PROMPT
+            library_exclusion_rule = ""
+            if is_library:
+                library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week at the same location (e.g. daily computer lab), EXCLUDE it. Otherwise, include all unique events."
+
             prompt = f"""
             Extract events at {master['name']} ({active_branch_name}) from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
             Rules:
