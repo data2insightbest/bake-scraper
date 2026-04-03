@@ -437,9 +437,10 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         active_zip = current_branch.get('zip_code') if current_branch else zip_code
         active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
 
-        # B&N URL Injection: For bookstores, we start at the homepage to trigger the session
+        # B&N URL Injection: We now inject the searchTerm directly to bypass the menu-driven search which often fails
         current_url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
         if is_bookstore and active_zip:
+            # HIGHLIGHT: Changed to a more direct search results URL to avoid manual interaction with the search field
             current_url = f"https://stores.barnesandnoble.com/search?searchTerm={active_zip}&view=list"
             
         try:
@@ -454,41 +455,31 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
 
             # CHANGE: Use 'commit' instead of 'load' for B&N to avoid protocol errors from heavy tracking scripts
-            wait_strategy = "commit" if is_bookstore else "load"
-            page.goto(current_url, wait_until=wait_strategy, timeout=60000)
-            page.wait_for_timeout(7000) 
-            
-            try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except:
-                print(f"    ⚠️ Network busy for {active_branch_name}, moving to scrape anyway.")
-
+            page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(5000) 
+           
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
             if mode == "specific" and active_zip:
                 try:
                     # --- START B&N SPECIFIC NAVIGATION ---
                     if is_bookstore:
-                        print(f"    🖱️ Locating 'Stores & Events' tab...")
-                        # Click the top-level "Stores & Events" link
-                        stores_tab = page.locator("a:has-text('Stores & Events'), #rh-stores-events").first
-                        if stores_tab.is_visible(timeout=5000):
-                            stores_tab.click()
-                            time.sleep(4)
+                        # HIGHLIGHT: Since we used a direct URL, we only need to find the specific "Store Events" link
+                        print(f"    🖱️ Locating 'Store Events' for {active_branch_name}...")
                         
-                        # Find the zip code input in the locator overlay or page
-                        search_field = page.locator("input#store-search-input, input[placeholder*='zip' i], #storeSearchInput").first
-                        if search_field.is_visible(timeout=5000):
-                            search_field.fill(str(active_zip))
-                            page.keyboard.press("Enter")
-                            time.sleep(5)
-                            
-                            # Click the "Store Events" link for the first result found
-                            events_btn = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
-                            if events_btn.is_visible(timeout=5000):
-                                events_btn.click()
-                                time.sleep(8) # Critical wait for the calendar to render
+                        # Use a more robust selector that targets the link within the search results
+                        events_btn = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
+                        
+                        if events_btn.is_visible(timeout=10000):
+                            events_btn.click()
+                            # HIGHLIGHT: Increased timeout to 12s as B&N calendars are very slow to populate via JS
+                            time.sleep(12) 
                         else:
-                            print(f"    ⚠️ Could not find search field for {active_zip}.")
+                            # Fallback: if not visible, try to refresh or look for generic "Events"
+                            print(f"    ⚠️ 'Store Events' button not found, checking for alternative event links...")
+                            alt_events = page.locator(".store-events-link, [href*='event']").first
+                            if alt_events.is_visible():
+                                alt_events.click()
+                                time.sleep(10)
                     # --- END B&N SPECIFIC NAVIGATION ---
                     
                     elif not is_bookstore:
