@@ -462,7 +462,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 print(f"    ⚠️ Network busy for {active_branch_name}, moving to scrape anyway.")
 
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
-           if mode == "specific" and active_zip:
+            if mode == "specific" and active_zip:
                 try:
                     # --- START B&N SPECIFIC NAVIGATION ---
                     if is_bookstore:
