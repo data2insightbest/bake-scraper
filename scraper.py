@@ -221,7 +221,7 @@ def save_events(events, target_branches, midnight, master, mode):
         
         if any(j in title_low for j in ["incoming", "hours", "schedule", "admission", "closed", "private"]):
             continue
-
+        
         # Calculate Score
         clean_text_for_score = re.sub(r'[^a-z0-9\s]', ' ', f"{title_low} {snippet.lower()}")
         clean_text_for_score = " ".join(clean_text_for_score.split())    
@@ -237,14 +237,14 @@ def save_events(events, target_branches, midnight, master, mode):
         
         for branch in processed_branches:
             should_save = False
-            
-            # Scenario A: Specific Mode (Looping branches via URL)
-            if mode == "specific":
+
+            # Scenario A: Specific Mode OR Single Location (Fixes B&N / LEGO / Slime Kitchen)
+            # If we are only processing one branch, we don't need to 'match' the name, 
+            # because the browser is already looking specifically at that branch's page.
+            if mode == "specific" or len(processed_branches) == 1:
                 should_save = True
             
-            # Scenario B: Global Mode (Single URL for multiple branches)
-            elif len(processed_branches) == 1:
-                should_save = True   
+            # Scenario B: Global Mode (Multiple branches in one scrape, e.g. Library System)
             else:
                 clean_id = branch["clean_identity"]
                 
@@ -551,11 +551,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 }""", kids_tags)
             else:
                 combined_text = page.evaluate("""() => {
-                    const items = document.querySelectorAll('.event-card, .event-item, .bn-events-item, article, [class*="event-item"]');
-                    return Array.from(items).map(i => {
-                        const loc = i.querySelector('.event-location, .store-name, .venue')?.innerText || "";
-                        return `EVENT_START\\nLOCATION_MARKER: ${loc}\\nCONTENT: ${i.innerText.substring(0, 1200)}\\nEVENT_END`;
-                    }).join('\\n---\\n');
+                    const items = document.querySelectorAll('.event-card, .event-item, .bn-events-item, article, [class*="event-item"], .event-details');
+                    if (items.length > 0) {
+                        return Array.from(items).map(i => {
+                            const loc = i.querySelector('.event-location, .store-name, .venue')?.innerText || "";
+                            return `EVENT_START\\nLOCATION_MARKER: ${loc}\\nCONTENT: ${i.innerText.substring(0, 1200)}\\nEVENT_END`;
+                        }).join('\\n---\\n');
+                    }
+                    return document.body.innerText.substring(0, 25000);
                 }""")
 
             # 5. THE PROMPT
@@ -568,12 +571,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             3. Snippet: 1 sentence, under 20 words.
             4. If no events found, return [].
             5. AGE TAGS: {", ".join(kids_tags[:10])}...
-            6. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults). EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
-            7. LOCATION: MUST identify specific branch. Current Branch Context: {active_branch_name}. 
+            6. IDENTITY: Identify the specific branch/city. Context: {active_branch_name}. 
+               If the event is for this branch, use '{active_branch_name}' for 'found_location'.
+            7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults). EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
+            8. LOCATION: MUST identify specific branch. Current Branch Context: {active_branch_name}. 
                If the event is branch-specific, use '{active_branch_name}' for 'found_location'. 
                NEVER use 'All Locations'. Skip if no branch identified.
-            8. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
-            9. MAX EVENTS: Up to 25. Ensure JSON is valid and closed.
+            9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
+            10. MAX EVENTS: Up to 25. Ensure JSON is valid and closed.
             """
 
             # 5. IDENTIFY AGE GROUP: Look for tags like 'Babies & Toddler', 'Kids', 'Teens', 'Preschoolers', 'Teens (13 to 18 years)', 'Children (6 to 9 years)', 'Preschoolers (3-5 years)', 'Tweens (9 to 12 years)', 'Toddlers (1 to 3 years)', 'Kids (5-9 yrs)', 'Babies (0-1 yrs)', 'Families', 'Preschoolers (3-5 yrs)', 'Teens (12-18 yrs)', 'Toddlers (1-3 yrs)', 'Tweens (9-12 yrs)', 'Preschool', 'Family Friendly', 'Teens', 'School Age', 'Baby/Toddler', 'Early Childhood', 'Elementary School Age', 'Family', 'Middle School Age', 'Teen', 'Baby – Preschool', 'Children'
