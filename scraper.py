@@ -437,6 +437,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         active_zip = current_branch.get('zip_code') if current_branch else zip_code
         active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
 
+        # CHANGE: B&N URL Injection for more reliable store landing
+        current_url = url
+        if is_bookstore and active_zip:
+            current_url = f"https://stores.barnesandnoble.com/search?searchTerm={active_zip}&view=list"
+
         try:
             # 1. Navigation Setup
             page.set_extra_http_headers({
@@ -448,8 +453,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             }) 
 
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
-            page.goto(url, wait_until="load", timeout=60000)
-            page.wait_for_timeout(5000) 
+            page.goto(current_url, wait_until="load", timeout=60000)
+            page.wait_for_timeout(7000) 
             
             try:
                 page.wait_for_load_state("networkidle", timeout=15000)
@@ -459,20 +464,21 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
             if mode == "specific" and active_zip:
                 try:
-                    # Generic picker logic for B&N/LEGO
-                    search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i], #storeSearchInput").first
-                    search_field.wait_for(state="visible", timeout=10000)
-                    search_field.fill(str(active_zip))
-                    page.keyboard.press("Enter")
+                    # CHANGE: Added B&N specific ID #store-search-input
+                    search_field = page.locator("input#store-search-input, input[placeholder*='zip' i], input[placeholder*='City' i], #storeSearchInput").first
                     
-                    # Wait for results and select 'Make this my store' if button exists
-                    time.sleep(5)
-                    select_btn = page.locator("text='Make This My Store', text='Select This Store', .btn-make-my-store").first
-                    if select_btn.is_visible():
+                    if search_field.is_visible(timeout=5000): # Check visibility before waiting/filling
+                        search_field.fill(str(active_zip))
+                        page.keyboard.press("Enter")
+                        time.sleep(5)
+
+                    select_btn = page.locator("text='Make This My Store', text='Select This Store', .btn-make-my-store, button:has-text('Store Details'), a:has-text('Store Details')").first
+                    if select_btn.is_visible(timeout=5000):
                         select_btn.click()
-                        time.sleep(8) # Wait for preference to save and page to reload
+                        time.sleep(8)
+
                 except Exception as e:
-                    print(f"    ⚠️ Store selection skipped for {active_branch_name}: {e}")
+                    print(f"    ⚠️ Store selection logic skipped/failed for {active_branch_name}. Proceeding with current view.")
 
             # 3. SCROLLING & LOADING (For Global/Library)
             if mode != "specific":
@@ -497,12 +503,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             safe_name = re.sub(r'\W+', '', f"{m_name}_{active_branch_name}")
             page.screenshot(path=f"debug_{safe_name}.png")      
 
-            raw_html = page.content()
-            clean_html_text = re.sub(r'<(script|style|meta|link|svg|path|footer|nav|header)[^>]*>.*?</\1>', '', raw_html, flags=re.DOTALL)
-            clean_html_text = re.sub(r'<[^>]+>', ' ', clean_html_text)
-            clean_html_text = re.sub(r'\s+', ' ', clean_html_text).strip()
-            
-            combined_text = ""
             kids_tags = [
                 "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
                 "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
