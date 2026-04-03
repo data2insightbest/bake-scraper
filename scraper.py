@@ -437,11 +437,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         active_zip = current_branch.get('zip_code') if current_branch else zip_code
         active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
 
-        # CHANGE: B&N URL Injection for more reliable store landing
+        # B&N URL Injection: For bookstores, we start at the homepage to trigger the session
         current_url = url
-        if is_bookstore and active_zip:
-            current_url = f"https://stores.barnesandnoble.com/search?searchTerm={active_zip}&view=list"
-
+        if is_bookstore:
+            current_url = "https://www.barnesandnoble.com/"
+            
         try:
             # 1. Navigation Setup
             page.set_extra_http_headers({
@@ -462,23 +462,47 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 print(f"    ⚠️ Network busy for {active_branch_name}, moving to scrape anyway.")
 
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
-            if mode == "specific" and active_zip:
+           if mode == "specific" and active_zip:
                 try:
-                    # CHANGE: Added B&N specific ID #store-search-input
-                    search_field = page.locator("input#store-search-input, input[placeholder*='zip' i], input[placeholder*='City' i], #storeSearchInput").first
+                    # --- START B&N SPECIFIC NAVIGATION ---
+                    if is_bookstore:
+                        print(f"    🖱️ Locating 'Stores & Events' tab...")
+                        # Click the top-level "Stores & Events" link
+                        stores_tab = page.locator("a:has-text('Stores & Events'), #rh-stores-events").first
+                        if stores_tab.is_visible(timeout=5000):
+                            stores_tab.click()
+                            time.sleep(4)
+                        
+                        # Find the zip code input in the locator overlay or page
+                        search_field = page.locator("input#store-search-input, input[placeholder*='zip' i], #storeSearchInput").first
+                        if search_field.is_visible(timeout=5000):
+                            search_field.fill(str(active_zip))
+                            page.keyboard.press("Enter")
+                            time.sleep(5)
+                            
+                            # Click the "Store Events" link for the first result found
+                            events_btn = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
+                            if events_btn.is_visible(timeout=5000):
+                                events_btn.click()
+                                time.sleep(8) # Critical wait for the calendar to render
+                        else:
+                            print(f"    ⚠️ Could not find search field for {active_zip}.")
+                    # --- END B&N SPECIFIC NAVIGATION ---
                     
-                    if search_field.is_visible(timeout=5000): # Check visibility before waiting/filling
-                        search_field.fill(str(active_zip))
-                        page.keyboard.press("Enter")
-                        time.sleep(5)
-
-                    select_btn = page.locator("text='Make This My Store', text='Select This Store', .btn-make-my-store, button:has-text('Store Details'), a:has-text('Store Details')").first
-                    if select_btn.is_visible(timeout=5000):
-                        select_btn.click()
-                        time.sleep(8)
+                    elif not is_bookstore:
+                        # Legacy/LEGO logic
+                        search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
+                        if search_field.is_visible(timeout=5000):
+                            search_field.fill(str(active_zip))
+                            page.keyboard.press("Enter")
+                            time.sleep(5)
+                            select_btn = page.locator("text='Select This Store', button:has-text('Store Details')").first
+                            if select_btn.is_visible(timeout=5000):
+                                select_btn.click()
+                                time.sleep(8)
 
                 except Exception as e:
-                    print(f"    ⚠️ Store selection logic skipped/failed for {active_branch_name}. Proceeding with current view.")
+                    print(f"    ⚠️ Store selection failed for {active_branch_name}: {e}")
 
             # 3. SCROLLING & LOADING (For Global/Library)
             if mode != "specific":
