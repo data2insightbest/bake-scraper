@@ -252,8 +252,8 @@ def save_events(events, target_branches, midnight, master, mode):
                 if clean_id and clean_id in search_blob:
                     should_save = True
                 # Rule 2: System-wide (Home Depot / Slime Kitchen)
-                elif any(x in found_loc for x in ["all", "system", "multiple", "various"]):
-                    is_hybrid = any(h in m_name.lower() for h in ["home depot", "lowe", "slime kitchen"])
+                elif any(x in found_loc for x in ["all", "system", "multiple", "various", "in-store"]):
+                    is_hybrid = any(h in m_name.lower() for h in ["home depot", "lowe", "slime kitchen", "lego"])
                     if is_hybrid or spec_score >= 10:
                         should_save = True
 
@@ -484,7 +484,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             page.wait_for_timeout(7000) 
             
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
-            if mode == "specific" and active_zip:
+            if (is_bookstore or is_lego) and active_zip:
                 try:
                     if is_bookstore:
                         # If we injected the ID, we are already on the events page
@@ -522,14 +522,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                                 else:
                                     print(f"    ⚠️ 'Store Events' button not found.")
                     
-                    elif not is_bookstore:
+                    elif is_lego:
                         print(f"    🖱️ Selecting LEGO Store for {active_branch_name} (ZIP: {active_zip})...")
-                        search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
+                        # --- CHANGE: Added #store-search-input to selectors ---
+                        search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i], #store-search-input").first
                         if search_field.is_visible(timeout=5000):
                             search_field.fill(str(active_zip))
                             page.keyboard.press("Enter")
                             time.sleep(5)
-                            # Look for 'Select This Store' or the detail button that activates the session for that store
                             select_btn = page.locator("text='Select This Store', button:has-text('Store Details'), .store-card button").first
                             if select_btn.is_visible(timeout=5000):
                                 select_btn.click(force=True)
@@ -539,7 +539,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     print(f"    ⚠️ Store selection failed for {active_branch_name}: {e}")
 
             # 3. SCROLLING & LOADING (For Global/Library)
-            if mode != "specific":
+            if mode != "specific" and not is_lego and not is_bookstore:
                 print(f"    🖱️ Scrolling {m_name} to trigger lazy-load...")
                 for _ in range(8):
                     page.mouse.wheel(0, 2000)
@@ -668,6 +668,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                NEVER use 'All Locations'. Skip if no branch identified.
             9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
             10. MAX EVENTS: Up to 25. Ensure JSON is valid and closed.
+            11. --- CHANGE: STRENGTHENED LOCATION RULE ---
+                You MUST set "found_location" to "{active_branch_name}" for every event found on this page.
             """
 
             # 5. IDENTIFY AGE GROUP: Look for tags like 'Babies & Toddler', 'Kids', 'Teens', 'Preschoolers', 'Teens (13 to 18 years)', 'Children (6 to 9 years)', 'Preschoolers (3-5 years)', 'Tweens (9 to 12 years)', 'Toddlers (1 to 3 years)', 'Kids (5-9 yrs)', 'Babies (0-1 yrs)', 'Families', 'Preschoolers (3-5 yrs)', 'Teens (12-18 yrs)', 'Toddlers (1-3 yrs)', 'Tweens (9-12 yrs)', 'Preschool', 'Family Friendly', 'Teens', 'School Age', 'Baby/Toddler', 'Early Childhood', 'Elementary School Age', 'Family', 'Middle School Age', 'Teen', 'Baby – Preschool', 'Children'
