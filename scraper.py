@@ -523,13 +523,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                                     print(f"    ⚠️ 'Store Events' button not found.")
                     
                     elif not is_bookstore:
-                        # LEGO Logic
+                        print(f"    🖱️ Selecting LEGO Store for {active_branch_name} (ZIP: {active_zip})...")
                         search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i]").first
                         if search_field.is_visible(timeout=5000):
                             search_field.fill(str(active_zip))
                             page.keyboard.press("Enter")
                             time.sleep(5)
-                            select_btn = page.locator("text='Select This Store', button:has-text('Store Details')").first
+                            # Look for 'Select This Store' or the detail button that activates the session for that store
+                            select_btn = page.locator("text='Select This Store', button:has-text('Store Details'), .store-card button").first
                             if select_btn.is_visible(timeout=5000):
                                 select_btn.click(force=True)
                                 time.sleep(8)
@@ -571,51 +572,78 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
             if is_library:
                 combined_text = page.evaluate("""(tagList) => {
-                    const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article'];
+                    // HIGHLIGHT: Added span to common containers to catch loose tags
+                    const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article', 'span.cp-event-audience'];
                     let eventData = [];
                     let seenTitles = new Set();
                     
                     cardSelectors.forEach(selector => {
                         document.querySelectorAll(selector).forEach(card => {
-                            const titleEl = card.querySelector('h2, h3, .title, .cp-event-title');
+                            // Find the container if the selector was just a span
+                            const container = card.tagName === 'SPAN' ? card.closest('article, .event-item, .cp-event-item') || card.parentElement : card;
+                            if (!container) return;
+
+                            const titleEl = container.querySelector('h2, h3, .title, .cp-event-title');
                             const title = titleEl?.innerText.trim() || "Unknown";
-                            const tagEls = card.querySelectorAll('.cp-screen-reader-message, [class*="screen-reader"], .sr-only, .cp-event-audience, .audience, .tags, .cp-event-item-metadata');
+                            
+                            // HIGHLIGHT: Broadened search for tags within spans and specific audience classes
+                            const tagEls = container.querySelectorAll('span, .cp-screen-reader-message, [class*="audience"], .tags, .cp-event-item-metadata');
                             let tagContext = "";
                             tagEls.forEach(s => tagContext += " " + s.innerText);
+                            
                             const lowerContext = tagContext.toLowerCase();
                             const lowerTitle = title.toLowerCase();
                             const hasKidTag = tagList.some(tag => {
                                 const t = tag.toLowerCase();
                                 return lowerContext.includes(t) || lowerTitle.includes(t);
                             });
-                            if (hasKidTag && !seenTitles.has(title)) {
-                                seenTitles.add(title);
-                                eventData.push(`TITLE: ${title}\\nVERIFIED_TAGS: ${tagContext}\\nBODY: ${card.innerText.substring(0, 1000)}`);
+
+                            if (hasKidTag && !seenTitles.has(title + container.innerText.substring(0,20))) {
+                                seenTitles.add(title + container.innerText.substring(0,20));
+                                eventData.push(`TITLE: ${title}\\nTAGS_FOUND: ${tagContext}\\nBODY: ${container.innerText.substring(0, 1000)}`);
                             }
                         });
                     });
+
+                    // Recursive fallback
                     if (eventData.length === 0) {
-                        const elements = document.querySelectorAll('div, section, li');
-                        elements.forEach(el => {
+                        document.querySelectorAll('div, section, li').forEach(el => {
                             const txt = el.innerText;
                             if (txt.length > 100 && txt.length < 1500) {
                                 const hasTag = tagList.some(t => txt.toLowerCase().includes(t.toLowerCase()));
-                                if (hasTag) { eventData.push(`[RECURSIVE_MATCH]\\nCONTENT: ${txt}`); }
+                                if (hasTag && !seenTitles.has(txt.substring(0,30))) { 
+                                    seenTitles.add(txt.substring(0,30));
+                                    eventData.push(`[RECURSIVE_MATCH]\\nCONTENT: ${txt}`); 
+                                }
                             }
                         });
                     }
                     return eventData.slice(0, 60).join('\\n---\\n');
-                }""", kids_tags)
+                }""", kids_tags)   
             else:
                 combined_text = page.evaluate("""() => {
-                    const items = document.querySelectorAll('.event-card, .event-item, .bn-events-item, article, [class*="event-item"], .event-details');
+                    // Try to remove scripts, styles, and huge navigation blocks to save tokens
+                    const noise = document.querySelectorAll('script, style, iframe, nav, footer, .header, #header');
+                    noise.forEach(n => n.remove());
+
+                    // Look specifically for the B&N event container or typical event list markers
+                    const specificContainers = document.querySelectorAll('.event-list-container, .bn-events-list, #events-list, .events-container');
+                    let targetArea = document.body;
+                    if (specificContainers.length > 0) {
+                        targetArea = specificContainers[0];
+                    }
+
+                    const items = targetArea.querySelectorAll('.event-card, .event-item, .bn-events-item, article, [class*="event-item"], .event-details, .store-event-card');
                     if (items.length > 0) {
                         return Array.from(items).map(i => {
-                            const loc = i.querySelector('.event-location, .store-name, .venue')?.innerText || "";
-                            return `EVENT_START\\nLOCATION_MARKER: ${loc}\\nCONTENT: ${i.innerText.substring(0, 1200)}\\nEVENT_END`;
+                            const loc = i.querySelector('.event-location, .store-name, .venue, .event-venue')?.innerText || "";
+                            // Clean inner text to remove extra whitespace
+                            const cleanText = i.innerText.replace(/\\s\\s+/g, ' ').trim();
+                            return `EVENT_START\\nLOCATION_MARKER: ${loc}\\nCONTENT: ${cleanText.substring(0, 1200)}\\nEVENT_END`;
                         }).join('\\n---\\n');
                     }
-                    return document.body.innerText.substring(0, 25000);
+                    // Fallback to body text but clean it up first
+                    return document.body.innerText.replace(/\\s\\s+/g, ' ').substring(0, 25000);
                 }""")
 
             # 5. THE PROMPT
@@ -631,7 +659,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                DATE EXPANSION: For recurring events like "Storytime", generate a separate JSON object for EVERY SINGLE DATE for the next 90 days.
             3. Snippet: 1 sentence, under 20 words.
             4. If no events found, return [].
-            5. AGE TAGS: {", ".join(kids_tags[:10])}...
+            5. AGE TAGS: {", ".join(kids_tags[:15])}...
             6. IDENTITY: Identify the specific branch/city. Context: {active_branch_name}. 
                If the event is for this branch, use '{active_branch_name}' for 'found_location'.
             7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults). EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
