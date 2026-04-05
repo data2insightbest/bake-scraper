@@ -439,12 +439,30 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
  
         current_url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
         if is_bookstore:
+            BN_ID_MAP = {
+                "san mateo": "2306",
+                "redwood city": "2265",
+                "emeryville": "2934",
+                "walnut creek": "2269",
+                "dublin": "2202",
+                "concord": "2323",
+                "fairfield": "2322",
+                "corte madera": "2274",
+                "san jose": "2088"
+            }
             # 1. ATTEMPT DIRECT INJECTION (Best: Store ID)
             # If your branch data has 'external_id' (e.g. 2927), we go straight to the events list
             store_id = current_branch.get('external_id') if current_branch else None
+            if not store_id:
+                clean_name = active_branch_name.lower().replace("barnes & noble", "").strip()
+                for city_key, cid in BN_ID_MAP.items():
+                    if city_key in clean_name:
+                        store_id = cid
+                        break
+
             if store_id:
                 current_url = f"https://stores.barnesandnoble.com/store/{store_id}?view=list&type=event"
-                print(f"    🚀 STRATEGY: Direct ID Injection for {active_branch_name}")
+                print(f"    🚀 STRATEGY: Direct ID Injection for {active_branch_name} (ID: {store_id})")
             # 2. FALLBACK TO SEARCH INJECTION (Better than home page)
             elif active_zip:
                 current_url = f"https://stores.barnesandnoble.com/search?searchTerm={active_zip}&view=list"
@@ -464,7 +482,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             # CHANGE: Use 'commit' instead of 'load' for B&N to avoid protocol errors from heavy tracking scripts
             page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(7000) 
-           
+            
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
             if mode == "specific" and active_zip:
                 try:
