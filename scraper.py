@@ -484,43 +484,58 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             page.wait_for_timeout(7000) 
             
             # 2. STORE SELECTION LOGIC (For B&N/LEGO)
+            if is_bookstore:
+                try:
+                    # Catch-all for modals/popups that block content
+                    close_btn = page.locator("button[aria-label*='Close' i], .modal-close, #close-icon, button:has-text('No Thanks'), .bx-close-x-adaptive").first
+                    if close_btn.is_visible(timeout=3000):
+                        close_btn.click()
+                        print("    ✨ Closed overlay/modal.")
+                        page.wait_for_timeout(2000) 
+                except: pass
+            
             if (is_bookstore or is_lego) and active_zip:
                 try:
                     if is_bookstore:
-                        # If we injected the ID, we are already on the events page
                         if "type=event" in page.url:
                             print(f"    ✨ Already at destination via Direct Injection.")
-                        else:
-                            print(f"    🖱️ Locating 'Store Events' for {active_branch_name}...")
                             
-                            # Use regex for fuzzy branch matching
+                            # --- 2. EXPLICIT SCROLLING (Trigger Lazy Load) ---
+                            print(f"    🖱️ Scrolling to trigger B&N event loading...")
+                            for _ in range(5):
+                                page.mouse.wheel(0, 1000)
+                                page.wait_for_timeout(1000)
+                            page.wait_for_timeout(2000)
+                            for _ in range(3): # Secondary pass
+                                page.mouse.wheel(0, 1000)
+                                page.wait_for_timeout(500)
+                        else:
+                            # Standard Store-Picker Navigation
+                            print(f"    🖱️ Locating 'Store Events' for {active_branch_name}...")
                             clean_branch = active_branch_name.split('-')[-1].strip()
                             branch_card = page.locator(f"div.store-info-container, .store-card-details").filter(has_text=re.compile(clean_branch, re.I)).first
                             
                             if branch_card.is_visible(timeout=7000):
                                 events_link = branch_card.locator("a:has-text('Store Events'), a[href*='/events/']").first
-                                
-                                # --- STRATEGY: FORCE INTERACTION ---
                                 events_link.scroll_into_view_if_needed()
                                 page.wait_for_timeout(1000)
 
                                 if events_link.is_visible():
-                                    # Using force=True to bypass potential invisible overlays (cookie banners)
                                     events_link.click(force=True)
-                                    print(f"    ✅ Force-Clicked 'Store Events' for {active_branch_name}")
-                                    page.wait_for_load_state("networkidle", timeout=15000)
-                                    time.sleep(5) 
+                                    print(f"    ✅ Clicked 'Store Events' for {active_branch_name}")
+                                    # --- 3. EXTENDED WAITING TIME FOR REDIRECT ---
+                                    time.sleep(10) 
+                                    for _ in range(5): # Post-redirect scroll
+                                        page.mouse.wheel(0, 1000)
+                                        time.sleep(1)
                                 else:
-                                    raise Exception("Events link not found within specific branch card")
+                                    raise Exception("Events link not found")
                             else:
-                                # Fallback to general events link
-                                print(f"    ⚠️ Branch card for '{clean_branch}' not visible, trying global fallback...")
+                                print(f"    ⚠️ Branch card not visible, trying fallback...")
                                 events_link = page.locator("a:has-text('Store Events'), a[href*='/events/']").first
                                 if events_link.is_visible(timeout=5000):
                                     events_link.click(force=True)
-                                    time.sleep(10)
-                                else:
-                                    print(f"    ⚠️ 'Store Events' button not found.")
+                                    time.sleep(12)
                     
                     elif is_lego:
                         print(f"    🖱️ Selecting LEGO Store for {active_branch_name} (ZIP: {active_zip})...")
@@ -622,28 +637,26 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 }""", kids_tags)   
             else:
                 combined_text = page.evaluate("""() => {
-                    // Try to remove scripts, styles, and huge navigation blocks to save tokens
-                    const noise = document.querySelectorAll('script, style, iframe, nav, footer, .header, #header');
+                    // Remove UI noise
+                    const noise = document.querySelectorAll('script, style, iframe, nav, footer, .header');
                     noise.forEach(n => n.remove());
-
-                    // Look specifically for the B&N event container or typical event list markers
-                    const specificContainers = document.querySelectorAll('.event-list-container, .bn-events-list, #events-list, .events-container');
+                    
+                    // TARGET AREA EXPANSION: Seek specific containers before falling back to body
+                    const selectors = ['.event-list-container', '.bn-events-list', '.store-events-details-container', '.event-card'];
                     let targetArea = document.body;
-                    if (specificContainers.length > 0) {
-                        targetArea = specificContainers[0];
+                    for (const s of selectors) {
+                        const found = document.querySelector(s);
+                        if (found) { targetArea = found.parentElement; break; }
                     }
 
-                    const items = targetArea.querySelectorAll('.event-card, .event-item, .bn-events-item, article, [class*="event-item"], .event-details, .store-event-card');
+                    const items = targetArea.querySelectorAll('.event-card, .event-item, .bn-events-item, article, .store-event-card');
                     if (items.length > 0) {
                         return Array.from(items).map(i => {
-                            const loc = i.querySelector('.event-location, .store-name, .venue, .event-venue')?.innerText || "";
-                            // Clean inner text to remove extra whitespace
-                            const cleanText = i.innerText.replace(/\\s\\s+/g, ' ').trim();
-                            return `EVENT_START\\nLOCATION_MARKER: ${loc}\\nCONTENT: ${cleanText.substring(0, 1200)}\\nEVENT_END`;
+                            return `EVENT_START\\nCONTENT: ${i.innerText.replace(/\\s\\s+/g, ' ').substring(0, 1200)}\\nEVENT_END`;
                         }).join('\\n---\\n');
                     }
-                    // Fallback to body text but clean it up first
-                    return document.body.innerText.replace(/\\s\\s+/g, ' ').substring(0, 25000);
+                    // Increase limit to 35k chars for massive museum/library pages
+                    return document.body.innerText.replace(/\\s\\s+/g, ' ').substring(0, 35000);
                 }""")
 
             # 5. THE PROMPT
@@ -668,8 +681,9 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                NEVER use 'All Locations'. Skip if no branch identified.
             9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
             10. MAX EVENTS: Up to 25. Ensure JSON is valid and closed.
-            11. --- CHANGE: STRENGTHENED LOCATION RULE ---
-                You MUST set "found_location" to "{active_branch_name}" for every event found on this page.
+            11. STRENGTHENED LOCATION RULE: You MUST set "found_location" to "{active_branch_name}" for every event found on this page.
+            12. B&N SPECIAL RULE: If you see 'Storytime', 'Book Club', or 'Author Event', extract them. These are high-priority. It is HIGHLY UNLIKELY that a major Barnes & Noble has 0 events. Look closer at the text for dates like 'Saturday at 11AM'.
+            
             """
 
             # 5. IDENTIFY AGE GROUP: Look for tags like 'Babies & Toddler', 'Kids', 'Teens', 'Preschoolers', 'Teens (13 to 18 years)', 'Children (6 to 9 years)', 'Preschoolers (3-5 years)', 'Tweens (9 to 12 years)', 'Toddlers (1 to 3 years)', 'Kids (5-9 yrs)', 'Babies (0-1 yrs)', 'Families', 'Preschoolers (3-5 yrs)', 'Teens (12-18 yrs)', 'Toddlers (1-3 yrs)', 'Tweens (9-12 yrs)', 'Preschool', 'Family Friendly', 'Teens', 'School Age', 'Baby/Toddler', 'Early Childhood', 'Elementary School Age', 'Family', 'Middle School Age', 'Teen', 'Baby – Preschool', 'Children'
