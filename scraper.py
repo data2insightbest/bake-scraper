@@ -410,10 +410,6 @@ import json
 import time
 from datetime import datetime, timedelta
 def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code=None):
-    """
-    Handles both global systems (Library) and store-specific systems (B&N, LEGO).
-    Optimized for free-tier API usage with increased spacing and branch-level precision.
-    """
     m_name = master.get('name', 'Unknown')
     is_library = "library" in m_name.lower()
     is_bookstore = "barnes" in m_name.lower()
@@ -587,65 +583,61 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 print(f"    ⚠️ No JSON events found. Starting Comprehensive DOM Capture...")
                 combined_text = ""
                 if is_library:
-                    # LIBRARY STRATEGY 1 & 2: Signature Metadata & Token Truncation
+                    # HIGHLIGHT: Restored and improved Library Logic
                     combined_text = page.evaluate("""(tagList) => {
-                        const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article', 'span.cp-event-audience'];
+                        const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article'];
                         let eventData = [];
                         let seenTitles = new Set();
+                        
                         cardSelectors.forEach(selector => {
                             document.querySelectorAll(selector).forEach(card => {
-                                const container = card.tagName === 'SPAN' ? card.closest('article, .event-item, .cp-event-item') || card.parentElement : card;
-                                if (!container) return;
-                                const titleEl = container.querySelector('h2, h3, .title, .cp-event-title');
-                                const title = titleEl?.innerText.trim() || "Unknown";
+                                const titleEl = card.querySelector('h2, h3, .title, .cp-event-title, [class*="title"]');
+                                if (!titleEl) return;
+                                const title = titleEl.innerText.trim();
                                 
                                 // Extract "Signature" Metadata
-                                const tagEls = container.querySelectorAll('span, .cp-screen-reader-message, [class*="audience"], .tags, .cp-event-item-metadata');
+                                const tagEls = card.querySelectorAll('span, .cp-screen-reader-message, [class*="audience"], .tags, .cp-event-item-metadata, .event-details');
                                 let tagContext = "";
                                 tagEls.forEach(s => tagContext += " " + s.innerText);
                                 
                                 const lowerContext = tagContext.toLowerCase();
-                                const hasKidTag = tagList.some(tag => lowerContext.includes(tag.toLowerCase()) || title.toLowerCase().includes(tag.toLowerCase()));
-                                if (hasKidTag && !seenTitles.has(title + container.innerText.substring(0,20))) {
-                                    seenTitles.add(title + container.innerText.substring(0,20));
-                                    eventData.push(`TITLE: ${title}\\nTAGS_FOUND: ${tagContext}\\nBODY: ${container.innerText.substring(0, 1000)}`);
+                                const lowerTitle = title.toLowerCase();
+                                const isLikelyKids = tagList.some(tag => lowerContext.includes(tag.toLowerCase()) || lowerTitle.includes(tag.toLowerCase()));
+                                
+                                // Create unique ID for the card to prevent dupes
+                                const uniqueKey = title + card.innerText.substring(0,25);
+                                if (!seenTitles.has(uniqueKey)) {
+                                    seenTitles.add(uniqueKey);
+                                    const label = isLikelyKids ? "[KIDS_PROBABLE]" : "[GENERAL]";
+                                    eventData.push(`${label} TITLE: ${title}\\nTAGS_FOUND: ${tagContext}\\nBODY: ${card.innerText.replace(/\\s\\s+/g, ' ').substring(0, 1000)}`);
                                 }
                             });
                         });
-                        // Token Truncation logic
-                        return eventData.slice(0, 50).join('\\n---\\n').substring(0, 15000);
+                        return eventData.slice(0, 60).join('\\n---\\n').substring(0, 18000);
                     }""", kids_tags)   
                 else:
-                    # B&N STRATEGIES: Shadow Root, Text-Stream, Coordinates
+                    # HIGHLIGHT: Improved B&N DOM Scrape (Shadow Root + Card Mapping)
                     combined_text = page.evaluate("""() => {
-                        // Strategy 1: Shadow Root Expansion
                         function getShadowText(root) {
                             let text = "";
                             root.querySelectorAll('*').forEach(el => {
                                 if (el.shadowRoot) text += " " + getShadowText(el.shadowRoot);
                             });
-                            return text + " " + root.innerHTML;
+                            return text;
                         }
                         const shadowContent = getShadowText(document.body);
-
+                        
+                        // Clean noise
                         const noise = document.querySelectorAll('script, style, iframe, nav, footer, .header');
                         noise.forEach(n => n.remove());
                         
-                        // Strategy 4: Coordinate-Based/Visible Area capture
-                        const selectors = ['.event-list-container', '.bn-events-list', '.store-events-details-container', '.event-card'];
-                        let targetArea = document.body;
-                        for (const s of selectors) {
-                            const found = document.querySelector(s);
-                            if (found) { targetArea = found.parentElement; break; }
+                        // Try mapping specific cards first
+                        const cards = document.querySelectorAll('.event-card, .event-item, .bn-events-item, article');
+                        if (cards.length > 0) {
+                            return Array.from(cards).map(c => `EVENT_START\\n${c.innerText.replace(/\\s\\s+/g, ' ').substring(0, 1000)}\\nEVENT_END`).join('\\n---\\n');
                         }
                         
-                        const items = targetArea.querySelectorAll('.event-card, .event-item, .bn-events-item, article, .store-event-card');
-                        if (items.length > 0) {
-                            return Array.from(items).map(i => `EVENT_START\\nCONTENT: ${i.innerText.replace(/\\s\\s+/g, ' ').substring(0, 1200)}\\nEVENT_END`).join('\\n---\\n');
-                        }
-                        
-                        // Strategy 2: Text-Stream Capture
-                        return (shadowContent + " " + document.body.innerText).replace(/\\s\\s+/g, ' ').substring(0, 30000);
+                        return (shadowContent + " " + document.body.innerText).replace(/\\s\\s+/g, ' ').substring(0, 25000);
                     }""")
                 
                 # 5. THE PROMPT
@@ -669,6 +661,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     """
                     # AGE TAGS: {", ".join(kids_tags[:15])}...
                     # 5. IDENTIFY AGE GROUP: Look for tags like 'Babies & Toddler', 'Kids', 'Teens', 'Preschoolers', 'Teens (13 to 18 years)', 'Children (6 to 9 years)', 'Preschoolers (3-5 years)', 'Tweens (9 to 12 years)', 'Toddlers (1 to 3 years)', 'Kids (5-9 yrs)', 'Babies (0-1 yrs)', 'Families', 'Preschoolers (3-5 yrs)', 'Teens (12-18 yrs)', 'Toddlers (1-3 yrs)', 'Tweens (9-12 yrs)', 'Preschool', 'Family Friendly', 'Teens', 'School Age', 'Baby/Toddler', 'Early Childhood', 'Elementary School Age', 'Family', 'Middle School Age', 'Teen', 'Baby – Preschool', 'Children'
+                    
                     events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
             
             # --- 3. FILTER AND SAVE ---
