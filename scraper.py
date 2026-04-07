@@ -478,10 +478,16 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         page.wait_for_timeout(2000) 
                 except: pass
             
-            # Branch Selection Logic
+            # Branch Selection & Store Interaction Logic
             if (is_bookstore or is_lego) and active_zip:
                 try:
                     if is_bookstore:
+                        # B&N STRATEGY 3: Event Listener Simulation (Force click event tab)
+                        page.evaluate("""() => {
+                            const eventTab = document.querySelector('a[href*="type=event"], #store-details-events-tab');
+                            if (eventTab) eventTab.click();
+                        }""")
+                        
                         if "type=event" in page.url:
                             print(f"    ✨ Already at destination via Direct Injection.")
                             print(f"    🖱️ Scrolling to trigger B&N event loading...")
@@ -517,12 +523,23 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 except Exception as e:
                     print(f"    ⚠️ Store selection failed for {active_branch_name}: {e}")
 
-            # Global Scrolling Logic
+            # Global Scrolling & LIBRARY STRATEGY 3: Dynamic Loading (Next Button)
             if mode != "specific" and not is_lego and not is_bookstore:
                 print(f"    🖱️ Scrolling {m_name} to trigger lazy-load...")
                 for _ in range(8):
                     page.mouse.wheel(0, 2000)
                     time.sleep(2.5) 
+                
+                if is_library:
+                    print(f"    🖱️ LIBRARY STRATEGY: Checking for dynamic 'Next' pagination...")
+                    for p_idx in range(3):
+                        next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next')").first
+                        if next_btn.is_visible(timeout=2000):
+                            next_btn.click()
+                            time.sleep(4)
+                            page.mouse.wheel(0, 2000)
+                        else: break
+
                 for i in range(5):
                     try:
                         load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more|see more", re.I))
@@ -570,6 +587,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 print(f"    ⚠️ No JSON events found. Starting Comprehensive DOM Capture...")
                 combined_text = ""
                 if is_library:
+                    # LIBRARY STRATEGY 1 & 2: Signature Metadata & Token Truncation
                     combined_text = page.evaluate("""(tagList) => {
                         const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article', 'span.cp-event-audience'];
                         let eventData = [];
@@ -580,9 +598,12 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                                 if (!container) return;
                                 const titleEl = container.querySelector('h2, h3, .title, .cp-event-title');
                                 const title = titleEl?.innerText.trim() || "Unknown";
+                                
+                                // Extract "Signature" Metadata
                                 const tagEls = container.querySelectorAll('span, .cp-screen-reader-message, [class*="audience"], .tags, .cp-event-item-metadata');
                                 let tagContext = "";
                                 tagEls.forEach(s => tagContext += " " + s.innerText);
+                                
                                 const lowerContext = tagContext.toLowerCase();
                                 const hasKidTag = tagList.some(tag => lowerContext.includes(tag.toLowerCase()) || title.toLowerCase().includes(tag.toLowerCase()));
                                 if (hasKidTag && !seenTitles.has(title + container.innerText.substring(0,20))) {
@@ -591,51 +612,62 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                                 }
                             });
                         });
-                        return eventData.slice(0, 60).join('\\n---\\n');
+                        // Token Truncation logic
+                        return eventData.slice(0, 50).join('\\n---\\n').substring(0, 15000);
                     }""", kids_tags)   
                 else:
+                    # B&N STRATEGIES: Shadow Root, Text-Stream, Coordinates
                     combined_text = page.evaluate("""() => {
+                        // Strategy 1: Shadow Root Expansion
+                        function getShadowText(root) {
+                            let text = "";
+                            root.querySelectorAll('*').forEach(el => {
+                                if (el.shadowRoot) text += " " + getShadowText(el.shadowRoot);
+                            });
+                            return text + " " + root.innerHTML;
+                        }
+                        const shadowContent = getShadowText(document.body);
+
                         const noise = document.querySelectorAll('script, style, iframe, nav, footer, .header');
                         noise.forEach(n => n.remove());
+                        
+                        // Strategy 4: Coordinate-Based/Visible Area capture
                         const selectors = ['.event-list-container', '.bn-events-list', '.store-events-details-container', '.event-card'];
                         let targetArea = document.body;
                         for (const s of selectors) {
                             const found = document.querySelector(s);
                             if (found) { targetArea = found.parentElement; break; }
                         }
+                        
                         const items = targetArea.querySelectorAll('.event-card, .event-item, .bn-events-item, article, .store-event-card');
                         if (items.length > 0) {
                             return Array.from(items).map(i => `EVENT_START\\nCONTENT: ${i.innerText.replace(/\\s\\s+/g, ' ').substring(0, 1200)}\\nEVENT_END`).join('\\n---\\n');
                         }
-                        return document.body.innerText.replace(/\\s\\s+/g, ' ').substring(0, 35000);
+                        
+                        // Strategy 2: Text-Stream Capture
+                        return (shadowContent + " " + document.body.innerText).replace(/\\s\\s+/g, ' ').substring(0, 30000);
                     }""")
                 
                 # 5. THE PROMPT
                 if combined_text and len(combined_text.strip()) > 100:
                     print(f"    🤖 Sending {len(combined_text)} chars to AI for parsing...")
-                    library_exclusion_rule = ""
-                    if is_library:
-                        library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week at the same location, EXCLUDE it." if is_library else ""
+                    library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week at the same location, EXCLUDE it." if is_library else ""
                     prompt = f"""
                     Extract events at {master['name']} ({active_branch_name}) from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
-                    Rules:
+                    Rules: 
                     1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}].
-                    2. DATE RULE: If the text says 'Every Monday', calculate the next 3 Mondays starting after {today.strftime('%B %d, %Y')}. 
-                       DATE EXPANSION: For recurring events like "Storytime", generate a separate JSON object for EVERY SINGLE DATE for the next 90 days.
+                    2. DATE RULE: Calculate recurrences for the next 90 days.
                     3. Snippet: 1 sentence, under 20 words.
                     4. If no events found, return [].
-                    5. AGE TAGS: {", ".join(kids_tags[:15])}...
-                    6. IDENTITY: Identify the specific branch/city. Context: {active_branch_name}. 
-                       If the event is for this branch, use '{active_branch_name}' for 'found_location'.
-                    7. EXCLUDE: Adult-only programming (Tax prep, ESL for adults, Career workshops, Senior socials, Book clubs for adults). EXCLUDE: Technical demos (iPhone/Mac basics) unless specifically for kids.
-                    8. LOCATION: MUST identify specific branch. Current Branch Context: {active_branch_name}. 
-                       If the event is branch-specific, use '{active_branch_name}' for 'found_location'. 
-                       NEVER use 'All Locations'. Skip if no branch identified.
-                    9. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
-                   10. MAX EVENTS: Up to 25. Ensure JSON is valid and closed.
-                   11. STRENGTHENED LOCATION RULE: You MUST set "found_location" to "{active_branch_name}" for every event found on this page.
-                   12. B&N SPECIAL RULE: If you see 'Storytime', 'Book Club', or 'Author Event', extract them. These are high-priority. It is HIGHLY UNLIKELY that a major Barnes & Noble has 0 events. Look closer at the text for dates like 'Saturday at 11AM'.            
+                    5. IDENTITY: Identify the specific branch/city. Context: {active_branch_name}. 
+                    6. LOCATION: MUST set "found_location" to "{active_branch_name}" for every event.
+                    7. EXCLUDE: Adult-only programming.
+                    8. B&N SPECIAL: Look for Storytime, Book Clubs, or Author events.
+                    9. MAX EVENTS: Up to 25. Ensure JSON is valid and closed.
+                    10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
+                    {library_exclusion_rule}
                     """
+                    # AGE TAGS: {", ".join(kids_tags[:15])}...
                     # 5. IDENTIFY AGE GROUP: Look for tags like 'Babies & Toddler', 'Kids', 'Teens', 'Preschoolers', 'Teens (13 to 18 years)', 'Children (6 to 9 years)', 'Preschoolers (3-5 years)', 'Tweens (9 to 12 years)', 'Toddlers (1 to 3 years)', 'Kids (5-9 yrs)', 'Babies (0-1 yrs)', 'Families', 'Preschoolers (3-5 yrs)', 'Teens (12-18 yrs)', 'Toddlers (1-3 yrs)', 'Tweens (9-12 yrs)', 'Preschool', 'Family Friendly', 'Teens', 'School Age', 'Baby/Toddler', 'Early Childhood', 'Elementary School Age', 'Family', 'Middle School Age', 'Teen', 'Baby – Preschool', 'Children'
                     events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
             
@@ -663,7 +695,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             print(f"❌ Error scraping {m_name} - {active_branch_name}: {e}")
         finally:
             page.close()
-
 
 import random
 def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code=None):
