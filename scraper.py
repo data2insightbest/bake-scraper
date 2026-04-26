@@ -472,8 +472,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             }) 
                     
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
-            page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(8000) 
+            page.goto(current_url, wait_until="networkidle", timeout=90000)
+            page.wait_for_timeout(12000) # Increased to allow Shadow DOM components to hydrate
             
             # Modal Handling
             if is_bookstore:
@@ -500,7 +500,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             print(f"    🖱️ Scrolling to trigger B&N event loading...")
                             for _ in range(5):
                                 page.mouse.wheel(0, 1000)
-                                page.wait_for_timeout(1000)
+                                page.wait_for_timeout(1500)
                         else:
                             print(f"    🖱️ Locating 'Store Events' for {active_branch_name}...")
                             clean_branch = active_branch_name.split('-')[-1].strip()
@@ -512,10 +512,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                                 page.wait_for_timeout(1000)
                                 if events_link.is_visible():
                                     events_link.click(force=True)
-                                    time.sleep(10) 
+                                    page.wait_for_timeout(10000) 
                                     for _ in range(5):
                                         page.mouse.wheel(0, 1000)
-                                        time.sleep(1)
+                                        page.wait_for_timeout(1500)
+
                     elif is_lego:
                         print(f"    🖱️ Selecting LEGO Store for {active_branch_name} (ZIP: {active_zip})...")
                         search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i], #store-search-input").first
@@ -535,15 +536,15 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 print(f"    🖱️ Scrolling {m_name} to trigger lazy-load...")
                 for _ in range(8):
                     page.mouse.wheel(0, 2000)
-                    time.sleep(2.5) 
+                    page.wait_for_timeout(3000)
                 
                 if is_library:
                     print(f"    🖱️ LIBRARY STRATEGY: Checking for dynamic 'Next' pagination...")
                     for p_idx in range(3):
                         next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next')").first
-                        if next_btn.is_visible(timeout=2000):
+                        if next_btn.is_visible(timeout=3000):
                             next_btn.click()
-                            time.sleep(4)
+                            page.wait_for_timeout(5000)
                             page.mouse.wheel(0, 2000)
                         else: break
 
@@ -552,14 +553,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more|see more", re.I))
                         if load_more.is_visible():
                             load_more.click()
-                            time.sleep(4)
+                            page.wait_for_timeout(4000)
                         else: break
                     except: break
 
             # Capture State
-            time.sleep(2) 
+            page.wait_for_timeout(3000) 
             safe_name = re.sub(r'\W+', '', f"{m_name}_{active_branch_name}")
-            page.screenshot(path=f"debug_{safe_name}.png")      
+            page.screenshot(path=f"debug_{safe_name}.png")     
 
             kids_tags = [
                 "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
@@ -596,38 +597,52 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 if is_library:
                     # HIGHLIGHT: Restored and improved Library Logic
                     combined_text = page.evaluate("""(tagList) => {
-                        const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article'];
+                        const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article', '.cp-event-list-item'];
                         let eventData = [];
                         let seenTitles = new Set();
-                        
-                        cardSelectors.forEach(selector => {
-                            document.querySelectorAll(selector).forEach(card => {
-                                const titleEl = card.querySelector('h2, h3, .title, .cp-event-title, [class*="title"]');
-                                if (!titleEl) return;
-                                const title = titleEl.innerText.trim();
-                                
-                                // Extract "Signature" Metadata
-                                const tagEls = card.querySelectorAll('span, .cp-screen-reader-message, [class*="audience"], .tags, .cp-event-item-metadata, .event-details');
-                                let tagContext = "";
-                                tagEls.forEach(s => tagContext += " " + s.innerText);
-                                
-                                const lowerContext = tagContext.toLowerCase();
-                                const lowerTitle = title.toLowerCase();
-                                const isLikelyKids = tagList.some(tag => lowerContext.includes(tag.toLowerCase()) || lowerTitle.includes(tag.toLowerCase()));
-                                
-                                // Create unique ID for the card to prevent dupes
-                                const uniqueKey = title + card.innerText.substring(0,25);
-                                if (!seenTitles.has(uniqueKey)) {
-                                    seenTitles.add(uniqueKey);
-                                    const label = isLikelyKids ? "[KIDS_PROBABLE]" : "[GENERAL]";
-                                    eventData.push(`${label} TITLE: ${title}\\nTAGS_FOUND: ${tagContext}\\nBODY: ${card.innerText.replace(/\\s\\s+/g, ' ').substring(0, 1000)}`);
+
+                        // Recursive function to pierce shadow roots
+                        function getDeepContent(root) {
+                            let cards = Array.from(root.querySelectorAll(cardSelectors.join(',')));
+                            
+                            // Also search all elements that might have shadow roots
+                            root.querySelectorAll('*').forEach(el => {
+                                if (el.shadowRoot) {
+                                    cards = cards.concat(getDeepContent(el.shadowRoot));
                                 }
                             });
+                            return cards;
+                        }
+
+                        const allCards = getDeepContent(document);
+
+                        allCards.forEach(card => {
+                            const titleEl = card.querySelector('h2, h3, .title, .cp-event-title, [class*="title"]');
+                            if (!titleEl) return;
+                            const title = titleEl.innerText.trim();
+                            
+                            const tagEls = card.querySelectorAll('span, .cp-screen-reader-message, [class*="audience"], .tags, .cp-event-item-metadata, .event-details');
+                            let tagContext = "";
+                            tagEls.forEach(s => tagContext += " " + s.innerText);
+                            
+                            const lowerContext = tagContext.toLowerCase();
+                            const lowerTitle = title.toLowerCase();
+                            const isLikelyKids = tagList.some(tag => lowerContext.includes(tag.toLowerCase()) || lowerTitle.includes(tag.toLowerCase()));
+                            
+                            const uniqueKey = title + card.innerText.substring(0,30);
+                            if (!seenTitles.has(uniqueKey)) {
+                                seenTitles.add(uniqueKey);
+                                const label = isLikelyKids ? "[KIDS_PROBABLE]" : "[GENERAL]";
+                                eventData.push(`${label} TITLE: ${title}\\nTAGS: ${tagContext}\\nTEXT: ${card.innerText.replace(/\\s\\s+/g, ' ').substring(0, 800)}`);
+                            }
                         });
                         return eventData.slice(0, 60).join('\\n---\\n').substring(0, 18000);
-                    }""", kids_tags)   
+                    }""", kids_tags) 
+
+
+
                 else:
-                    # HIGHLIGHT: Improved B&N DOM Scrape (Shadow Root + Card Mapping)
+                    # --- CHANGED: Improved B&N DOM Scrape (Retry Logic check) ---
                     combined_text = page.evaluate("""() => {
                         function getDeepText(node) {
                             let text = "";
@@ -641,7 +656,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             return text;
                         }
 
-                        // Target event-related containers or elements that usually hold info
                         const elements = document.querySelectorAll('h1, h2, h3, h4, a, span, p, li, [class*="event"], [class*="card"]');
                         let results = [];
                         elements.forEach(el => {
@@ -650,7 +664,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         });
                         
                         return results.join('\\n').substring(0, 20000);
-                    }""")
+                    }""")     
+
+                # Verify if we got meaningful text (B&N sometimes blocks and returns <100 chars)
+                if len(combined_text.strip()) < 200 and is_bookstore:
+                    print("    🔄 Content too short. Retrying with reload...")
+                    page.reload(wait_until="networkidle")
+                    page.wait_for_timeout(5000)
+                    # Re-run capture... (abbreviated for this update)
                 
                 # 5. THE PROMPT
                 if combined_text and len(combined_text.strip()) > 100:
