@@ -440,7 +440,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         if is_library:
             if not any(word in current_url.lower() for word in ["calendar", "events", "biblio", "program"]):
                 current_url = current_url.rstrip('/') + "/events"
-                print(f"    🚀 STRATEGY: Appending /events for Library: {active_branch_name}")
+                print(f"    🚀 LIBRARY STRATEGY: Appending /events to path for {active_branch_name}")
                 
         if is_bookstore:
             BN_ID_MAP = {
@@ -473,7 +473,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
             page.goto(current_url, wait_until="networkidle", timeout=90000)
-            page.wait_for_timeout(12000) # Increased to allow Shadow DOM components to hydrate
+            page.wait_for_timeout(8000) # Increased to allow Shadow DOM components to hydrate
             
             # Modal Handling
             if is_bookstore:
