@@ -142,10 +142,12 @@ def save_events(events, target_branches, midnight, master, mode):
     Restores the PRE-CLEAN session for performance while supporting branch-looping.
     """
     from __main__ import supabase, is_valid_date
-    
+
+    # --- DYNAMIC CONTEXT BLOCK (For Date Handling) ---
     m_id = master['id']
     m_name = master.get('name', 'Unknown')
     today = datetime.now().date()
+    # -------------------------------------------------
     
     # 1. ALWAYS Update heartbeat timestamp
     try:
@@ -409,6 +411,7 @@ import re
 import json
 import time
 from datetime import datetime, timedelta
+
 def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code=None):
     m_name = master.get('name', 'Unknown')
     is_library = "library" in m_name.lower()
@@ -431,6 +434,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
  
         current_url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
+        if is_library:
+            if not any(word in current_url.lower() for word in ["calendar", "events", "biblio", "program"]):
+                current_url = current_url.rstrip('/') + "/events"
+                print(f"    🚀 STRATEGY: Appending /events for Library: {active_branch_name}")
+                
         if is_bookstore:
             BN_ID_MAP = {
                 "san mateo": "2306", "redwood city": "2265", "emeryville": "2934",
@@ -462,7 +470,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
             page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(7000) 
+            page.wait_for_timeout(8000) 
             
             # Modal Handling
             if is_bookstore:
@@ -618,26 +626,27 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 else:
                     # HIGHLIGHT: Improved B&N DOM Scrape (Shadow Root + Card Mapping)
                     combined_text = page.evaluate("""() => {
-                        function getShadowText(root) {
+                        function getDeepText(node) {
                             let text = "";
-                            root.querySelectorAll('*').forEach(el => {
-                                if (el.shadowRoot) text += " " + getShadowText(el.shadowRoot);
-                            });
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                text += node.textContent + " ";
+                            } else if (node.shadowRoot) {
+                                text += getDeepText(node.shadowRoot);
+                            } else if (node.childNodes) {
+                                node.childNodes.forEach(child => { text += getDeepText(child); });
+                            }
                             return text;
                         }
-                        const shadowContent = getShadowText(document.body);
+
+                        // Target event-related containers or elements that usually hold info
+                        const elements = document.querySelectorAll('h1, h2, h3, h4, a, span, p, li, [class*="event"], [class*="card"]');
+                        let results = [];
+                        elements.forEach(el => {
+                            const content = getDeepText(el).trim();
+                            if (content.length > 10) results.push(content);
+                        });
                         
-                        // Clean noise
-                        const noise = document.querySelectorAll('script, style, iframe, nav, footer, .header');
-                        noise.forEach(n => n.remove());
-                        
-                        // Try mapping specific cards first
-                        const cards = document.querySelectorAll('.event-card, .event-item, .bn-events-item, article');
-                        if (cards.length > 0) {
-                            return Array.from(cards).map(c => `EVENT_START\\n${c.innerText.replace(/\\s\\s+/g, ' ').substring(0, 1000)}\\nEVENT_END`).join('\\n---\\n');
-                        }
-                        
-                        return (shadowContent + " " + document.body.innerText).replace(/\\s\\s+/g, ' ').substring(0, 25000);
+                        return results.join('\\n').substring(0, 20000);
                     }""")
                 
                 # 5. THE PROMPT
@@ -648,7 +657,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     Extract events at {master['name']} ({active_branch_name}) from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
                     Rules: 
                     1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}].
-                    2. DATE RULE: Calculate recurrences for the next 90 days.
+                    2. DATE RULE: Calculate recurrences for the next 90 days. IMPORTANT: If a date is found without a year (e.g., "Oct 12"), assume the year is {current_year}.
                     3. Snippet: 1 sentence, under 20 words.
                     4. If no events found, return [].
                     5. IDENTITY: Identify the specific branch/city. Context: {active_branch_name}. 
@@ -658,10 +667,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     9. MAX EVENTS: Up to 25. Ensure JSON is valid and closed.
                     10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
                     {library_exclusion_rule}
-                    """
-                    # AGE TAGS: {", ".join(kids_tags[:15])}...
-                    # 5. IDENTIFY AGE GROUP: Look for tags like 'Babies & Toddler', 'Kids', 'Teens', 'Preschoolers', 'Teens (13 to 18 years)', 'Children (6 to 9 years)', 'Preschoolers (3-5 years)', 'Tweens (9 to 12 years)', 'Toddlers (1 to 3 years)', 'Kids (5-9 yrs)', 'Babies (0-1 yrs)', 'Families', 'Preschoolers (3-5 yrs)', 'Teens (12-18 yrs)', 'Toddlers (1-3 yrs)', 'Tweens (9-12 yrs)', 'Preschool', 'Family Friendly', 'Teens', 'School Age', 'Baby/Toddler', 'Early Childhood', 'Elementary School Age', 'Family', 'Middle School Age', 'Teen', 'Baby – Preschool', 'Children'
-                    
+                    """   
                     events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
             
             # --- 3. FILTER AND SAVE ---
