@@ -10,6 +10,9 @@ from google import genai
 from supabase import create_client
 from playwright.sync_api import sync_playwright
 
+# Defining this here fixes the NameError immediately
+current_year = datetime.now().year 
+
 # --- Setup ---
 supabase = create_client(os.environ['VITE_SUPABASE_URL'], os.environ['VITE_SUPABASE_KEY'])
 client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
@@ -417,7 +420,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     is_library = "library" in m_name.lower()
     is_bookstore = "barnes" in m_name.lower()
     is_lego = "lego" in m_name.lower()
-    
+
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
     today = datetime.now()
     future_date = today + timedelta(days=90)
