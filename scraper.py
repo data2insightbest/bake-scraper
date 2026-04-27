@@ -414,7 +414,6 @@ import re
 import json
 import time
 from datetime import datetime, timedelta
-
 def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code=None):
     m_name = master.get('name', 'Unknown')
     is_library = "library" in m_name.lower()
@@ -424,6 +423,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
     today = datetime.now()
     future_date = today + timedelta(days=90)
+    current_year = today.year
     range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
 
     # Determine if we need to loop through branches or scrape once
@@ -531,27 +531,28 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 except Exception as e:
                     print(f"    ⚠️ Store selection failed for {active_branch_name}: {e}")
 
-            # Global Scrolling & LIBRARY STRATEGY 3: Dynamic Loading (Next Button)
-            if mode != "specific" and not is_lego and not is_bookstore:
-                print(f"    🖱️ Scrolling {m_name} to trigger lazy-load...")
-                for _ in range(8):
-                    page.mouse.wheel(0, 2000)
-                    page.wait_for_timeout(3000)
-                
-                if is_library:
-                    print(f"    🖱️ LIBRARY STRATEGY: Checking for dynamic 'Next' pagination...")
-                    for p_idx in range(3):
-                        next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next')").first
-                        if next_btn.is_visible(timeout=3000):
-                            next_btn.click()
-                            page.wait_for_timeout(5000)
-                            page.mouse.wheel(0, 2000)
-                        else: break
+            # HIGHLIGHT: Global Scrolling & Pagination (Fixed to run for all modes if Library)
+            print(f"    🖱️ Scrolling {m_name} to trigger lazy-load...")
+            scroll_count = 8 if not is_lego else 2
+            for _ in range(scroll_count):
+                page.mouse.wheel(0, 2000)
+                page.wait_for_timeout(2000)
+            
+            if is_library:
+                print(f"    🖱️ LIBRARY STRATEGY: Deep Pagination (Next Button)...")
+                for p_idx in range(3):
+                    next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next')").first
+                    if next_btn.is_visible(timeout=3000):
+                        next_btn.click()
+                        page.wait_for_timeout(5000)
+                        page.mouse.wheel(0, 2000)
+                    else: break
 
+                # Also try generic "Load More"
                 for i in range(5):
                     try:
                         load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more|see more", re.I))
-                        if load_more.is_visible():
+                        if load_more.is_visible(timeout=2000):
                             load_more.click()
                             page.wait_for_timeout(4000)
                         else: break
@@ -592,88 +593,69 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
             # --- FALLBACK TO DOM SCRAPE + AI ---
             if not events:
-                print(f"    ⚠️ No JSON events found. Starting Comprehensive DOM Capture...")
-                combined_text = ""
-                if is_library:
-                    # HIGHLIGHT: Restored and improved Library Logic
-                    combined_text = page.evaluate("""(tagList) => {
-                        const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article', '.cp-event-list-item'];
-                        let eventData = [];
-                        let seenTitles = new Set();
-
-                        // Recursive function to pierce shadow roots
-                        function getDeepContent(root) {
-                            let cards = Array.from(root.querySelectorAll(cardSelectors.join(',')));
-                            
-                            // Also search all elements that might have shadow roots
-                            root.querySelectorAll('*').forEach(el => {
-                                if (el.shadowRoot) {
-                                    cards = cards.concat(getDeepContent(el.shadowRoot));
+                def perform_dom_capture():
+                    if is_library:
+                        return page.evaluate("""(tagList) => {
+                            const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article', '.cp-event-list-item'];
+                            let eventData = [];
+                            let seenTitles = new Set();
+                            function getDeepContent(root) {
+                                let cards = Array.from(root.querySelectorAll(cardSelectors.join(',')));
+                                root.querySelectorAll('*').forEach(el => {
+                                    if (el.shadowRoot) cards = cards.concat(getDeepContent(el.shadowRoot));
+                                });
+                                return cards;
+                            }
+                            const allCards = getDeepContent(document);
+                            allCards.forEach(card => {
+                                const titleEl = card.querySelector('h2, h3, .title, .cp-event-title, [class*="title"]');
+                                if (!titleEl) return;
+                                const title = titleEl.innerText.trim();
+                                const tagEls = card.querySelectorAll('span, .cp-screen-reader-message, [class*="audience"], .tags, .cp-event-item-metadata, .event-details');
+                                let tagContext = "";
+                                tagEls.forEach(s => tagContext += " " + s.innerText);
+                                const isLikelyKids = tagList.some(tag => (tagContext + title).toLowerCase().includes(tag.toLowerCase()));
+                                const uniqueKey = title + card.innerText.substring(0,30);
+                                if (!seenTitles.has(uniqueKey)) {
+                                    seenTitles.add(uniqueKey);
+                                    const label = isLikelyKids ? "[KIDS_PROBABLE]" : "[GENERAL]";
+                                    eventData.push(`${label} TITLE: ${title}\\nTAGS: ${tagContext}\\nTEXT: ${card.innerText.replace(/\\s\\s+/g, ' ').substring(0, 800)}`);
                                 }
                             });
-                            return cards;
-                        }
-
-                        const allCards = getDeepContent(document);
-
-                        allCards.forEach(card => {
-                            const titleEl = card.querySelector('h2, h3, .title, .cp-event-title, [class*="title"]');
-                            if (!titleEl) return;
-                            const title = titleEl.innerText.trim();
-                            
-                            const tagEls = card.querySelectorAll('span, .cp-screen-reader-message, [class*="audience"], .tags, .cp-event-item-metadata, .event-details');
-                            let tagContext = "";
-                            tagEls.forEach(s => tagContext += " " + s.innerText);
-                            
-                            const lowerContext = tagContext.toLowerCase();
-                            const lowerTitle = title.toLowerCase();
-                            const isLikelyKids = tagList.some(tag => lowerContext.includes(tag.toLowerCase()) || lowerTitle.includes(tag.toLowerCase()));
-                            
-                            const uniqueKey = title + card.innerText.substring(0,30);
-                            if (!seenTitles.has(uniqueKey)) {
-                                seenTitles.add(uniqueKey);
-                                const label = isLikelyKids ? "[KIDS_PROBABLE]" : "[GENERAL]";
-                                eventData.push(`${label} TITLE: ${title}\\nTAGS: ${tagContext}\\nTEXT: ${card.innerText.replace(/\\s\\s+/g, ' ').substring(0, 800)}`);
+                            return eventData.slice(0, 60).join('\\n---\\n').substring(0, 18000);
+                        }""", kids_tags)
+                    else:
+                        return page.evaluate("""() => {
+                            function getDeepText(node) {
+                                let text = "";
+                                if (node.nodeType === Node.TEXT_NODE) text += node.textContent + " ";
+                                else if (node.shadowRoot) text += getDeepText(node.shadowRoot);
+                                else if (node.childNodes) node.childNodes.forEach(child => { text += getDeepText(child); });
+                                return text;
                             }
-                        });
-                        return eventData.slice(0, 60).join('\\n---\\n').substring(0, 18000);
-                    }""", kids_tags) 
+                            const elements = document.querySelectorAll('h1, h2, h3, h4, a, span, p, li, [class*="event"], [class*="card"]');
+                            let results = [];
+                            elements.forEach(el => {
+                                const content = getDeepText(el).trim();
+                                if (content.length > 10) results.push(content);
+                            });
+                            return results.join('\\n').substring(0, 20000);
+                        }""")
 
+                print(f"    ⚠️ No JSON events found. Starting Comprehensive DOM Capture...")
+                combined_text = perform_dom_capture()
 
-
-                else:
-                    # --- CHANGED: Improved B&N DOM Scrape (Retry Logic check) ---
-                    combined_text = page.evaluate("""() => {
-                        function getDeepText(node) {
-                            let text = "";
-                            if (node.nodeType === Node.TEXT_NODE) {
-                                text += node.textContent + " ";
-                            } else if (node.shadowRoot) {
-                                text += getDeepText(node.shadowRoot);
-                            } else if (node.childNodes) {
-                                node.childNodes.forEach(child => { text += getDeepText(child); });
-                            }
-                            return text;
-                        }
-
-                        const elements = document.querySelectorAll('h1, h2, h3, h4, a, span, p, li, [class*="event"], [class*="card"]');
-                        let results = [];
-                        elements.forEach(el => {
-                            const content = getDeepText(el).trim();
-                            if (content.length > 10) results.push(content);
-                        });
-                        
-                        return results.join('\\n').substring(0, 20000);
-                    }""")     
-
-                # Verify if we got meaningful text (B&N sometimes blocks and returns <100 chars)
-                if len(combined_text.strip()) < 200 and is_bookstore:
-                    print("    🔄 Content too short. Retrying with reload...")
+                # HIGHLIGHT: Improved B&N Recovery Strategy
+                if is_bookstore and len(combined_text.strip()) < 200:
+                    print("    🔄 B&N RECOVERY: Content too short. Retrying with hard reload and deep wait...")
                     page.reload(wait_until="networkidle")
-                    page.wait_for_timeout(5000)
-                    # Re-run capture... (abbreviated for this update)
+                    page.wait_for_timeout(15000) # Deep wait for hydration
+                    for _ in range(3):
+                        page.mouse.wheel(0, 1000)
+                        page.wait_for_timeout(1000)
+                    combined_text = perform_dom_capture()
                 
-                # 5. THE PROMPT
+                # THE PROMPT
                 if combined_text and len(combined_text.strip()) > 100:
                     print(f"    🤖 Sending {len(combined_text)} chars to AI for parsing...")
                     library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week at the same location, EXCLUDE it." if is_library else ""
