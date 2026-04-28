@@ -426,7 +426,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     current_year = today.year
     range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
 
-    # Determine if we need to loop through branches or scrape once
     branches_to_process = target_branches if (mode == "specific" and (is_bookstore or is_lego)) else [None]
 
     for current_branch in branches_to_process:
@@ -472,7 +471,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             }) 
                     
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
-            # HIGHLIGHT: Changed to domcontentloaded and reduced timeout to speed up stuck pages
+            # FIX: Reverted to 'networkidle' for dynamic sites (Libraries/B&N)
             wait_type = "networkidle" if (is_library or is_bookstore) else "domcontentloaded"
             page.goto(current_url, wait_until=wait_type, timeout=90000)
             page.wait_for_timeout(6000) # FIX: Increased back to 6s for JS hydration
@@ -481,7 +480,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             if is_bookstore:
                 try:
                     close_btn = page.locator("button[aria-label*='Close' i], .modal-close, #close-icon, button:has-text('No Thanks'), .bx-close-x-adaptive").first
-                    if close_btn.is_visible(timeout=2000):
+                    if close_btn.is_visible(timeout=3000):
                         close_btn.click()
                         print("    ✨ Closed overlay/modal.")
                         page.wait_for_timeout(1000) 
@@ -499,7 +498,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         if "type=event" in page.url:
                             print(f"    ✨ Already at destination via Direct Injection.")
                             print(f"    🖱️ Scrolling to trigger B&N event loading...")
-                            for _ in range(5): # HIGHLIGHT: Reduced from 5
+                            for _ in range(5): # FIX: Increased back to 5 for lazy load
                                 page.mouse.wheel(0, 1000)
                                 page.wait_for_timeout(1000)
                         else:
@@ -513,7 +512,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                                 if events_link.is_visible():
                                     events_link.click(force=True)
                                     page.wait_for_timeout(6000) 
-                                    for _ in range(3):
+                                    for _ in range(5): # FIX: Increased back to 5
                                         page.mouse.wheel(0, 1000)
                                         page.wait_for_timeout(1000)
 
@@ -537,18 +536,18 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             for _ in range(scroll_count):
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1500)
-
+            
             if is_library:
                 print(f"    🖱️ LIBRARY STRATEGY: Deep Pagination...")
-                for p_idx in range(4): # HIGHLIGHT: Reduced from 3
+                for p_idx in range(4): # FIX: Increased back to 4 for more events
                     next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next')").first
-                    if next_btn.is_visible(timeout=2000):
+                    if next_btn.is_visible(timeout=3000):
                         next_btn.click()
                         page.wait_for_timeout(4000)
                         page.mouse.wheel(0, 2000)
                     else: break
 
-                for i in range(5): # HIGHLIGHT: Reduced from 5
+                for i in range(5): # FIX: Increased back to 5
                     try:
                         load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more", re.I))
                         if load_more.is_visible(timeout=2000):
@@ -557,9 +556,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         else: break
                     except: break
 
-            # Capture State
             page.wait_for_timeout(2000) 
-            # (Screenshot logic omitted for brevity)
 
             kids_tags = [
                 "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
@@ -570,7 +567,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             ]
 
             events = None 
-            # --- ATTEMPT JSON EXTRACTION ---
             if is_bookstore:
                 print(f"    🧪 Attempting Direct JSON Extraction (B&N Native Data)...")
                 events = page.evaluate("""() => {
@@ -589,13 +585,12 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     } catch (err) { return null; }
                 }""")
 
-            # --- FALLBACK TO DOM SCRAPE + AI ---
-            combined_text = "" # Initialize
+            combined_text = "" 
             if not events:
                 def perform_dom_capture():
                     if is_library:
                         return page.evaluate("""(tagList) => {
-                            const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article', '.cp-event-list-item'];
+                            const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article', '.cp-event-list-item', '.event-card'];
                             let eventData = [];
                             let seenTitles = new Set();
                             function getDeepContent(root) {
@@ -644,18 +639,16 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 print(f"    ⚠️ No JSON events found. Starting Comprehensive DOM Capture...")
                 combined_text = perform_dom_capture()
 
-                # HIGHLIGHT: Improved B&N Recovery Strategy
                 if is_bookstore and len(combined_text.strip()) < 200:
                     print("    🔄 B&N RECOVERY: Retrying with deep wait...")
-                    page.reload(wait_until="domcontentloaded")
+                    page.reload(wait_until="networkidle") # FIX: Harder reload for B&N
                     page.wait_for_timeout(10000) 
-                    for _ in range(3):
+                    for _ in range(5):
                         page.mouse.wheel(0, 1000)
                         page.wait_for_timeout(1000)
                     combined_text = perform_dom_capture()
                 
-                # THE PROMPT
-                # HIGHLIGHT: Increased threshold to 400 to avoid sending "Access Denied" or "Rate Limited" text to AI
+                # FIX: Lowered threshold from 400 back to 100 to capture legitimate but small results
                 if combined_text and len(combined_text.strip()) > 100:
                     print(f"    🤖 Sending {len(combined_text)} chars to AI for parsing...")
                     library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week at the same location, EXCLUDE it." if is_library else ""
@@ -678,7 +671,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 else:
                     print(f"    ⚠️ Skipping AI: Content too thin ({len(combined_text or '')} chars).")
             
-            # --- 3. FILTER AND SAVE ---
             if events:
                 exclude_list = ["adult", "senior", "tax prep", "citizenship test"]
                 filtered_events = [
@@ -695,9 +687,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 print(f"    ⚠️ No events extracted for {active_branch_name}. Skipping save.")
 
             if current_branch != branches_to_process[-1]:
-                # HIGHLIGHT: Reduced from 15s to 5s
-                print(f"    ⏳ Spacing out requests (5s)...")
-                time.sleep(10)
+                print(f"    ⏳ Spacing out requests (10s)...")
+                time.sleep(10) # FIX: Increased back to 10s to avoid bot detection
 
         except Exception as e:
             print(f"❌ Error scraping {m_name} - {active_branch_name}: {e}")
