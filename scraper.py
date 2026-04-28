@@ -473,8 +473,9 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
             # HIGHLIGHT: Changed to domcontentloaded and reduced timeout to speed up stuck pages
-            page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(4000) # HIGHLIGHT: Reduced from 8000
+            wait_type = "networkidle" if (is_library or is_bookstore) else "domcontentloaded"
+            page.goto(current_url, wait_until=wait_type, timeout=90000)
+            page.wait_for_timeout(6000) # FIX: Increased back to 6s for JS hydration
             
             # Modal Handling
             if is_bookstore:
@@ -498,7 +499,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         if "type=event" in page.url:
                             print(f"    ✨ Already at destination via Direct Injection.")
                             print(f"    🖱️ Scrolling to trigger B&N event loading...")
-                            for _ in range(3): # HIGHLIGHT: Reduced from 5
+                            for _ in range(5): # HIGHLIGHT: Reduced from 5
                                 page.mouse.wheel(0, 1000)
                                 page.wait_for_timeout(1000)
                         else:
@@ -532,14 +533,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
             # Global Scrolling & Pagination
             print(f"    🖱️ Scrolling {m_name}...")
-            scroll_count = 5 if not is_lego else 2 # HIGHLIGHT: Reduced from 8
+            scroll_count = 8 if (is_library or is_bookstore) else 3 # FIX: Context-aware scrolling
             for _ in range(scroll_count):
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1500)
-            
+
             if is_library:
                 print(f"    🖱️ LIBRARY STRATEGY: Deep Pagination...")
-                for p_idx in range(2): # HIGHLIGHT: Reduced from 3
+                for p_idx in range(4): # HIGHLIGHT: Reduced from 3
                     next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next')").first
                     if next_btn.is_visible(timeout=2000):
                         next_btn.click()
@@ -547,7 +548,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         page.mouse.wheel(0, 2000)
                     else: break
 
-                for i in range(3): # HIGHLIGHT: Reduced from 5
+                for i in range(5): # HIGHLIGHT: Reduced from 5
                     try:
                         load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more", re.I))
                         if load_more.is_visible(timeout=2000):
@@ -655,7 +656,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 
                 # THE PROMPT
                 # HIGHLIGHT: Increased threshold to 400 to avoid sending "Access Denied" or "Rate Limited" text to AI
-                if combined_text and len(combined_text.strip()) > 400:
+                if combined_text and len(combined_text.strip()) > 100:
                     print(f"    🤖 Sending {len(combined_text)} chars to AI for parsing...")
                     library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week at the same location, EXCLUDE it." if is_library else ""
                     prompt = f"""
@@ -696,7 +697,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             if current_branch != branches_to_process[-1]:
                 # HIGHLIGHT: Reduced from 15s to 5s
                 print(f"    ⏳ Spacing out requests (5s)...")
-                time.sleep(5)
+                time.sleep(10)
 
         except Exception as e:
             print(f"❌ Error scraping {m_name} - {active_branch_name}: {e}")
