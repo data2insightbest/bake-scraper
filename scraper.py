@@ -430,6 +430,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
     for current_branch in branches_to_process:
         page = context.new_page()
+        page.set_default_timeout(30000)
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
       
         active_zip = current_branch.get('zip_code') if current_branch else zip_code
@@ -471,12 +472,12 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             }) 
                     
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
-            # FIX: Reverted to 'networkidle' for dynamic sites (Libraries/B&N)
-            wait_type = "networkidle" if (is_library or is_bookstore) else "domcontentloaded"
+            # CHANGE: Changed "networkidle" to "domcontentloaded" to prevent infinite hanging on tracking pixels
+            wait_type = "domcontentloaded" 
             page.goto(current_url, wait_until=wait_type, timeout=90000)
-            page.wait_for_timeout(6000) # FIX: Increased back to 6s for JS hydration
+            # CHANGE: Increased hydration wait to 8s to ensure dynamic event lists appear
+            page.wait_for_timeout(8000) 
             
-            # Modal Handling
             if is_bookstore:
                 try:
                     close_btn = page.locator("button[aria-label*='Close' i], .modal-close, #close-icon, button:has-text('No Thanks'), .bx-close-x-adaptive").first
@@ -486,7 +487,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         page.wait_for_timeout(1000) 
                 except: pass
             
-            # Branch Selection & Store Interaction Logic
             if (is_bookstore or is_lego) and active_zip:
                 try:
                     if is_bookstore:
@@ -498,7 +498,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         if "type=event" in page.url:
                             print(f"    ✨ Already at destination via Direct Injection.")
                             print(f"    🖱️ Scrolling to trigger B&N event loading...")
-                            for _ in range(5): # FIX: Increased back to 5 for lazy load
+                            for _ in range(5):
                                 page.mouse.wheel(0, 1000)
                                 page.wait_for_timeout(1000)
                         else:
@@ -512,7 +512,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                                 if events_link.is_visible():
                                     events_link.click(force=True)
                                     page.wait_for_timeout(6000) 
-                                    for _ in range(5): # FIX: Increased back to 5
+                                    for _ in range(5):
                                         page.mouse.wheel(0, 1000)
                                         page.wait_for_timeout(1000)
 
@@ -530,16 +530,15 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 except Exception as e:
                     print(f"    ⚠️ Store selection failed for {active_branch_name}: {e}")
 
-            # Global Scrolling & Pagination
             print(f"    🖱️ Scrolling {m_name}...")
-            scroll_count = 8 if (is_library or is_bookstore) else 3 # FIX: Context-aware scrolling
+            scroll_count = 8 if (is_library or is_bookstore) else 3 
             for _ in range(scroll_count):
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1500)
             
             if is_library:
                 print(f"    🖱️ LIBRARY STRATEGY: Deep Pagination...")
-                for p_idx in range(4): # FIX: Increased back to 4 for more events
+                for p_idx in range(4):
                     next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next')").first
                     if next_btn.is_visible(timeout=3000):
                         next_btn.click()
@@ -547,7 +546,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         page.mouse.wheel(0, 2000)
                     else: break
 
-                for i in range(5): # FIX: Increased back to 5
+                for i in range(5):
                     try:
                         load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more", re.I))
                         if load_more.is_visible(timeout=2000):
@@ -569,18 +568,19 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             events = None 
             if is_bookstore:
                 print(f"    🧪 Attempting Direct JSON Extraction (B&N Native Data)...")
+                # CHANGE: Updated B&N JSON extractor to be more resilient to different store data structures
                 events = page.evaluate("""() => {
                     const nextData = document.getElementById('__NEXT_DATA__');
                     if (!nextData) return null;
                     try {
                         const json = JSON.parse(nextData.textContent);
-                        const store = json.props?.pageProps?.storeDetails;
+                        const store = json.props?.pageProps?.storeDetails || json.props?.pageProps?.store;
                         if (!store || !store.events) return null;
                         return store.events.map(e => ({
                             title: e.title,
                             event_date: new Date(e.date).toISOString().split('T')[0],
                             snippet: (e.description || "Store event").substring(0, 150),
-                            found_location: store.name
+                            found_location: store.name || "Barnes & Noble"
                         }));
                     } catch (err) { return null; }
                 }""")
@@ -589,6 +589,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             if not events:
                 def perform_dom_capture():
                     if is_library:
+                        # CHANGE: Piercing Shadow DOM specifically for Library calendar widgets
                         return page.evaluate("""(tagList) => {
                             const cardSelectors = ['.cp-event-item', '.biblio-item', '.event-item', '.cp-events-item', 'article', '.cp-event-list-item', '.event-card'];
                             let eventData = [];
@@ -619,6 +620,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             return eventData.slice(0, 60).join('\\n---\\n').substring(0, 18000);
                         }""", kids_tags)
                     else:
+                        # CHANGE: General Shadow DOM piercer for Museums/Other places that use modern web components
                         return page.evaluate("""() => {
                             function getDeepText(node) {
                                 let text = "";
@@ -641,14 +643,15 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
                 if is_bookstore and len(combined_text.strip()) < 200:
                     print("    🔄 B&N RECOVERY: Retrying with deep wait...")
-                    page.reload(wait_until="networkidle") # FIX: Harder reload for B&N
+                    page.reload(wait_until="domcontentloaded") 
                     page.wait_for_timeout(10000) 
                     for _ in range(5):
                         page.mouse.wheel(0, 1000)
                         page.wait_for_timeout(1000)
                     combined_text = perform_dom_capture()
                 
-                # FIX: Lowered threshold from 400 back to 100 to capture legitimate but small results
+                # CHANGE: Threshold lowered from 400 to 100 characters. 
+                # This ensures we don't skip pages that have legitimate events but very little "fluff" text.
                 if combined_text and len(combined_text.strip()) > 100:
                     print(f"    🤖 Sending {len(combined_text)} chars to AI for parsing...")
                     library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week at the same location, EXCLUDE it." if is_library else ""
@@ -666,7 +669,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     9. MAX EVENTS: Up to 25. Ensure JSON is valid and closed.
                     10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
                     {library_exclusion_rule}
-                    """   
+                    """    
                     events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
                 else:
                     print(f"    ⚠️ Skipping AI: Content too thin ({len(combined_text or '')} chars).")
@@ -688,7 +691,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
             if current_branch != branches_to_process[-1]:
                 print(f"    ⏳ Spacing out requests (10s)...")
-                time.sleep(10) # FIX: Increased back to 10s to avoid bot detection
+                time.sleep(10)
 
         except Exception as e:
             print(f"❌ Error scraping {m_name} - {active_branch_name}: {e}")
