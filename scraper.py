@@ -836,6 +836,9 @@ def run_scraper():
             else:
                 print(f"🌐 Universal/Museum Scrape (Type 2): {m['name']}")
                 scrape_and_save_2(context, m, branches, "global", midnight_today)
+
+            print(f"☕ Finished {m['name']}. Cooling down 15s for API stability...")
+            time.sleep(15)
             
         browser.close()
 
