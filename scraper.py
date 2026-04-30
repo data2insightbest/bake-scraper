@@ -301,6 +301,11 @@ def generate_with_retry(prompt, text_content, context_name="General"):
     Combines your original trailing-comma fix with a new salvage step 
     to handle truncated text (e.g., 'Welcome spr...').
     """
+    # GATEKEEPER: If the text is too thin (like the 216-char B&N failure), don't waste API quota
+    if len(text_content.strip()) < 500:
+        print(f"    ⚠️ Skipping API for {context_name}: Content too thin ({len(text_content)} chars).")
+        return []
+        
     for attempt in range(3):                
         try:
             # Linear backoff to respect API limits
