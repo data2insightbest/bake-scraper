@@ -308,12 +308,18 @@ def generate_with_retry(prompt, text_content, context_name="General"):
         
     for attempt in range(3):                
         try:
-            # Linear backoff to respect API limits
-            time.sleep(2 + attempt) 
+            # --- HIGHLIGHTED CHANGE 1: TPM SCALING ---
+            # Instead of a fixed 30k, we reduce data on retries to bypass Token Limits.
+            # Attempt 0: 30k chars | Attempt 1: 15k chars | Attempt 2: 7.5k chars
+            content_limit = 30000 // (2**attempt)
+            
+            # --- HIGHLIGHTED CHANGE 2: AGGRESSIVE BACKOFF ---
+            # Linear backoff was too short for new 2026 safety throttles.
+            time.sleep(5 + (attempt * 5)) 
             
             response = client.models.generate_content(
                 model='gemini-2.0-flash', 
-                contents=[prompt, text_content[:30000]]
+                contents=[prompt, text_content[:content_limit]] # Use scaled limit
             )
             
             if not response or not hasattr(response, 'text') or not response.text:
@@ -327,30 +333,23 @@ def generate_with_retry(prompt, text_content, context_name="General"):
             end_idx = res_text.rfind(']') + 1
             
             if start_idx != -1:
-                # If no closing bracket found, take everything from the start to end of string
                 raw_json = res_text[start_idx:end_idx] if end_idx > start_idx else res_text[start_idx:]
                 
                 try:
-                    # 1. Try standard parse
                     return json.loads(raw_json)
                 except json.JSONDecodeError:
                     print(f"    🔧 Attempting advanced repair for {context_name}...")
                     
-                    # 2. EMERGENCY SALVAGE: Find the last completed event '}'
-                    # This recovers events if the AI cut off mid-sentence (e.g. "Welcome spr...")
                     last_brace = raw_json.rfind('}')
                     if last_brace != -1:
                         salvaged_json = raw_json[:last_brace + 1]
                         try:
-                            # Try closing the array right after the last good object
                             return json.loads(salvaged_json + "]")
                         except:
                             pass
                     
-                    # 3. YOUR ORIGINAL REPAIR LOGIC: Clean up trailing commas/half-written properties
                     clean_json = re.sub(r'\},[^\}]*$', '}', raw_json)    
                     
-                    # 4. Try your original common closing sequences
                     for fix in [']', '}]', '"}]', '"}]}']:
                         try:
                             return json.loads(clean_json + fix)
@@ -358,7 +357,6 @@ def generate_with_retry(prompt, text_content, context_name="General"):
                             continue
 
             # --- LAYER 2: MARKDOWN BLOCK EXTRACTION (Fallback) ---
-            # Finds content inside ```json ... ``` using safe bracket notation
             blocks = re.findall(r'[`]{3}(?:json)?\s*(.*?)\s*[`]{3}', res_text, re.DOTALL)
             for block in blocks:
                 try:
@@ -367,7 +365,6 @@ def generate_with_retry(prompt, text_content, context_name="General"):
                     continue
 
             # --- LAYER 3: AGGRESSIVE RAW STRIP (Last Resort) ---
-            # Removes backticks and tries to parse the whole string
             final_attempt = re.sub(r'[`]{3}json\s*|[`]{3}', '', res_text).strip()
             try:
                 return json.loads(final_attempt)
@@ -379,8 +376,10 @@ def generate_with_retry(prompt, text_content, context_name="General"):
         except Exception as e:
             err_msg = str(e).lower()
             if "429" in err_msg:
-                wait = (attempt + 1) * 30
-                print(f"    ⏳ Rate limited. Sleeping {wait}s...")
+                # --- HIGHLIGHTED CHANGE 3: EXTENDED WAIT ---
+                # Paid tier 429s require a significant reset period.
+                wait = (attempt + 1) * 45 
+                print(f"    ⏳ Rate limited (TPM). Sleeping {wait}s and reducing content...")
                 time.sleep(wait)
             else:
                 print(f"    ❌ AI Error for {context_name}: {e}")
