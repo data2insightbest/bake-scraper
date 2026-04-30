@@ -435,7 +435,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     for current_branch in branches_to_process:
         page = context.new_page()
         
-        # Resource Blocking. Prevents loading images/fonts/media. 
         page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,otf,css}", lambda route: route.abort())
         
         page.set_default_timeout(45000) 
@@ -482,12 +481,15 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
             
-            # CHANGE: Reverted to 'domcontentloaded' for Museum speed, kept buffer for Library/B&N
-            page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(4000) 
+            # --- HIGHLIGHTED CHANGE 1: INCREASED WAIT FOR CONTENT ---
+            # Using 'networkidle' ensures JavaScript-heavy sites like B&N are fully rendered
+            page.goto(current_url, wait_until="networkidle", timeout=90000)
+            page.wait_for_timeout(5000) 
             
             if is_bookstore:
                 try:
+                    # Specific wait for the events container to avoid "thin content" errors
+                    page.wait_for_selector(".store-details-events-section, .event-card-details", timeout=15000)
                     close_btn = page.locator("button[aria-label*='Close' i], .modal-close, #close-icon, button:has-text('No Thanks'), .bx-close-x-adaptive").first
                     if close_btn.is_visible(timeout=3000):
                         close_btn.click()
@@ -498,7 +500,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             if (is_bookstore or is_lego) and active_zip:
                 try:
                     if is_bookstore:
-                        # CHANGE: Click specific 'Events' link if direct injection didn't land on it
                         if "type=event" not in page.url:
                             event_tab = page.locator("a[href*='type=event'], #store-details-events-tab").first
                             if event_tab.is_visible(timeout=3000):
@@ -580,8 +581,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             combined_text = "" 
             if not events:
                 def perform_dom_capture():
-                    # CHANGE: Passed arguments as a DICTIONARY to fix the positional argument crash.
-                    # CHANGE: Swapped to a more efficient recursive walker to prevent browser hang.
+                    # --- HIGHLIGHTED CHANGE 2: DEEP SHADOW-DOM TRAVERSAL ---
+                    # Added a robust recursive walker that extracts text from Shadow Roots (often used in B&N components)
                     return page.evaluate("""(args) => {
                         const { tagList, isLibrary } = args;
                         function getDeepContent(root) {
@@ -589,7 +590,9 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             if (root.nodeType === 3) text += root.textContent + " ";
                             if (root.shadowRoot) text += getDeepContent(root.shadowRoot);
                             if (root.childNodes) {
-                                root.childNodes.forEach(n => text += getDeepContent(n));
+                                for (let i = 0; i < root.childNodes.length; i++) {
+                                    text += getDeepContent(root.childNodes[i]);
+                                }
                             }
                             return text;
                         }
@@ -618,22 +621,20 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 print(f"    ⚠️ No JSON events found. Starting Comprehensive DOM Capture...")
                 raw_capture = perform_dom_capture()
                 
-                # CHANGE: Python-side Intelligence Filter. 
-                # Instead of sending 15k chars to Gemini, we filter for relevant kid-friendly keywords first.
                 if raw_capture and len(raw_capture) > 2000 and not is_library:
                     print("    ✂️ Pruning DOM text to keep under Rate Limits...")
                     words_to_keep = ["kid", "child", "family", "story", "workshop", "museum", "lego", "baby", "toddler", "youth", "teen"]
                     sentences = raw_capture.split('.')
                     filtered_sentences = [s for s in sentences if any(w in s.lower() for w in words_to_keep)]
-                    combined_text = ". ".join(filtered_sentences)[:8000] # Cap at 8k to be safe
+                    combined_text = ". ".join(filtered_sentences)[:8000] 
                 else:
                     combined_text = raw_capture[:12000]
 
-                if is_bookstore and len(combined_text.strip()) < 200:
-                    print("    🔄 B&N RECOVERY: Retrying with deep wait...")
-                    page.reload(wait_until="domcontentloaded") 
+                if is_bookstore and len(combined_text.strip()) < 500:
+                    print("    🔄 B&N RECOVERY: Retrying with deep wait and scroll...")
+                    page.reload(wait_until="networkidle") 
                     page.wait_for_timeout(10000) 
-                    for _ in range(5):
+                    for _ in range(8):
                         page.mouse.wheel(0, 1000)
                         page.wait_for_timeout(1000)
                     combined_text = perform_dom_capture()
