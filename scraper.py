@@ -424,6 +424,15 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     is_bookstore = "barnes" in m_name.lower()
     is_lego = "lego" in m_name.lower()
 
+    # --- ADDED: EXHAUSTIVE WHITELIST ---
+    kids_tags = [
+        "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
+        "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
+        "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", 
+        "Preschool", "Family Friendly", "School Age", "Baby/Toddler", "Early Childhood", 
+        "Elementary School Age", "Family", "Middle School Age", "Teen", "Children"
+    ]
+
     url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
     today = datetime.now()
     future_date = today + timedelta(days=90)
@@ -479,7 +488,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
             
-            # --- MODIFIED: Slightly faster load with manual wait for stability ---
             page.goto(current_url, wait_until="domcontentloaded", timeout=90000)
             page.wait_for_timeout(7000) 
             
@@ -526,24 +534,17 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1000)
             
-            if is_library:
-                print(f"    🖱️ LIBRARY STRATEGY: Deep Pagination...")
-                for p_idx in range(4):
-                    next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next')").first
-                    if next_btn.is_visible(timeout=3000):
-                        next_btn.click()
-                        page.wait_for_timeout(4000)
-                        page.mouse.wheel(0, 2000)
-                    else: break
-
-                for i in range(5):
-                    try:
-                        load_more = page.get_by_role("button", name=re.compile(r"load more|view more|show more", re.I))
-                        if load_more.is_visible(timeout=2000):
-                            load_more.click()
-                            page.wait_for_timeout(3000)
-                        else: break
-                    except: break
+            # --- MODIFIED: CONSOLIDATED DEEP PAGINATION LOOP ---
+            print(f"    🖱️ STRATEGY: Aggressive Pagination...")
+            for p_idx in range(6): # Increased range for deeper discovery
+                # Try clicking any form of "Next" or "Load More"
+                next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next'), button:has-text('Load More'), button:has-text('Show More')").first
+                if next_btn.is_visible(timeout=3000):
+                    next_btn.click()
+                    page.wait_for_timeout(4000)
+                    page.mouse.wheel(0, 2000)
+                else: 
+                    break
 
             page.wait_for_timeout(2000) 
 
@@ -568,12 +569,10 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
             combined_text = "" 
             if not events:
-                # --- HIGHLIGHTED CHANGE 1: CLUSTER-BASED DOM CAPTURE ---
+                # --- MODIFIED: ANCHOR & PRUNE DOM CAPTURE ---
                 def perform_dom_capture():
                     return page.evaluate("""(args) => {
-                        const { isLibrary } = args;
-                        
-                        // Select common event containers to group data
+                        const { isLibrary, branchName, kidsTags } = args;
                         const selectors = [
                             '.event-card', '.cp-event-item', '.biblio-item', '.event-item', 
                             '.cp-events-item', 'article', '.cp-event-list-item', '[class*="event" i]'
@@ -583,19 +582,22 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         const elements = document.querySelectorAll(selectors.join(','));
                         
                         elements.forEach(el => {
-                            // Only capture blocks that look like they contain a date (digit/month)
-                            const hasDate = /[0-9]|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/i.test(el.innerText);
-                            if (el.innerText.length > 40 && hasDate) {
-                                clusters.push(el.innerText.replace(/\\s+/g, ' ').trim());
+                            const text = el.innerText;
+                            const hasDate = /[0-9]|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/i.test(text);
+                            
+                            // ANCHOR: Check if branch name or a Whitelist tag is present
+                            const hasBranch = text.toLowerCase().includes(branchName.toLowerCase());
+                            const hasTag = kidsTags.some(tag => text.includes(tag));
+                            
+                            if (text.length > 40 && hasDate && (hasBranch || hasTag || !isLibrary)) {
+                                clusters.push(text.replace(/\\s+/g, ' ').trim());
                             }
                         });
 
-                        // If we found specific event blocks, return them delimited
                         if (clusters.length > 2) {
                             return clusters.join('\\n--- [EVENT CLUSTER] ---\\n');
                         }
 
-                        // Fallback: Deep Shadow DOM Walker if no clusters found
                         function getDeepContent(root) {
                             let text = "";
                             if (root.nodeType === 3) text += root.textContent + " ";
@@ -608,30 +610,29 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             return text;
                         }
                         return getDeepContent(document.body).replace(/\\s\\s+/g, ' ');
-                    }""", {"isLibrary": is_library})
+                    }""", {"isLibrary": is_library, "branchName": active_branch_name, "kidsTags": kids_tags})
 
-                print(f"    ⚠️ No JSON events found. Starting Cluster-Based DOM Capture...")
+                print(f"    ⚠️ Starting Anchor & Prune DOM Capture...")
                 raw_capture = perform_dom_capture()
                 
-                # --- HIGHLIGHTED CHANGE 2: SEMANTIC PRUNING ---
-                # We filter out lines that don't contain children-related keywords or dates
+                # --- MODIFIED: WHITELIST SEMANTIC PRUNING ---
                 if raw_capture and len(raw_capture) > 500:
                     print("    ✂️ Pruning content to high-relevance 'Kid' signals...")
-                    kids_keywords = ["kid", "child", "family", "story", "workshop", "museum", "lego", "baby", "toddler", "youth", "teen", "craft", "read"]
                     lines = raw_capture.split('\n')
                     
-                    # Keep a line if it has a keyword OR looks like it contains a date/time
                     filtered_lines = [
                         l for l in lines 
-                        if any(k in l.lower() for k in kids_keywords) or any(char.isdigit() for char in l)
+                        if any(tag in l for tag in kids_tags) 
+                        or any(k in l.lower() for k in ["story", "lego", "craft", "steam", "maker"])
+                        or any(char.isdigit() for char in l)
                     ]
                     
-                    combined_text = "\n".join(filtered_lines)[:15000] # Use a larger, cleaner context
+                    combined_text = "\n".join(filtered_lines)[:18000] 
                 else:
                     combined_text = raw_capture[:12000]
 
                 if is_bookstore and len(combined_text.strip()) < 400:
-                    print("    🔄 B&N RECOVERY: Retrying with deep wait and scroll...")
+                    print("    🔄 B&N RECOVERY: Retrying with deep wait...")
                     page.reload(wait_until="networkidle") 
                     page.wait_for_timeout(10000) 
                     for _ in range(8):
@@ -643,42 +644,38 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     print(f"    🤖 Sending {len(combined_text)} chars to AI for parsing...")
                     library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week at the same location, EXCLUDE it." if is_library else ""
                     
-                    # --- HIGHLIGHTED CHANGE 3: EXPERT PERSONA PROMPT ---
+                    # --- MODIFIED: ENHANCED EXPERT PROMPT ---
                     prompt = f"""
                     ACT AS AN EXPERT PARENTING EVENT COORDINATOR. 
-                    Extract events at {master['name']} ({active_branch_name}) from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
+                    Extract ALL events at {master['name']} ({active_branch_name}) from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
 
                     Rules: 
-                    1. Return ONLY a JSON list of objects: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}].
-                    2. DATE RULE: Calculate recurrences for the next 90 days. IMPORTANT: If a date is found without a year (e.g., "Oct 12"), assume the year is {current_year}.
-                    3. Snippet: 1 sentence, under 20 words.
-                    4. If no events found, return [].
-                    5. IDENTITY: Identify the specific branch/city. Context: {active_branch_name}. 
-                    6. LOCATION: MUST set "found_location" to "{active_branch_name}" for every event.
-                    7. EXCLUDE: Adult-only programming (tax prep, seniors, etc.).
-                    8. B&N SPECIAL: Look for Storytime, Book Clubs, or Author events.
-                    9. MAX EVENTS: Up to 25. Ensure JSON is valid and strictly closed.
-                    10. RECURRING: For daily events, only provide TWO entries per week (Saturdays and Sundays).
+                    1. Return ONLY a JSON list: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}].
+                    2. DATE RULE: Use year {current_year}. Calculate 90 days of recurrences.
+                    3. Snippet: 1 sentence, max 20 words.
+                    4. IDENTITY: Data must belong to {active_branch_name}.
+                    5. LOCATION: Set "found_location" to "{active_branch_name}".
+                    6. INCLUSION: Prioritize events matching these tags: {", ".join(kids_tags)}.
+                    7. EXCLUDE: Adult-only/Senior programming.
+                    8. MAX EVENTS: 40.
+                    9. RECURRING: For daily events, only provide entries for Saturdays and Sundays.
                     {library_exclusion_rule}
 
-                    INSTRUCTIONS for Text Analysis:
-                    - Scan the provided text for '--- [EVENT CLUSTER] ---' markers.
-                    - If the text is raw DOM, prioritize blocks containing dates and kid-related keywords.
+                    INSTRUCTIONS:
+                    - Process segments marked '--- [EVENT CLUSTER] ---'.
+                    - If no year is found, assume {current_year}.
                     """
-                    
-                    if combined_text:
-                        print(f"    DEBUG: First 200 chars: {combined_text[:200].replace('\n', ' ')}")
                     
                     events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
                 else:
-                    print(f"    ⚠️ Skipping AI: Content too thin ({len(combined_text or '')} chars).")
+                    print(f"    ⚠️ Skipping AI: Content too thin.")
             
             if events:
                 exclude_list = ["adult", "senior", "tax prep", "citizenship test"]
                 filtered_events = [
                     ev for ev in events 
                     if not any(word in (ev.get('title', '') + " " + ev.get('snippet', '')).lower() for word in exclude_list) 
-                    or "family" in (ev.get('title', '') + " " + ev.get('snippet', '')).lower()
+                    or any(tag.lower() in (ev.get('title', '') + " " + ev.get('snippet', '')).lower() for tag in kids_tags)
                 ]
                 
                 if filtered_events:
@@ -686,10 +683,10 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     save_events(filtered_events, targets, midnight, master, mode)
                     print(f"    ✅ Successfully found {len(filtered_events)} events for {active_branch_name}.")
             else:
-                print(f"    ⚠️ No events extracted for {active_branch_name}. Skipping save.")
+                print(f"    ⚠️ No events extracted for {active_branch_name}.")
 
             if current_branch != branches_to_process[-1]:
-                sleep_time = random.randint(12, 20) # Increased sleep to protect TPM
+                sleep_time = random.randint(12, 20)
                 print(f"    ⏳ Spacing out requests ({sleep_time}s)...")
                 time.sleep(sleep_time)
 
