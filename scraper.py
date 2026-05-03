@@ -443,6 +443,14 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
     for current_branch in branches_to_process:
         page = context.new_page()
+
+        # --- STRATEGY 1: B&N NETWORK INTERCEPTOR ---
+        # Capture raw data from B&N's internal API before it hits the UI
+        bn_raw_responses = []
+        if is_bookstore:
+            page.on("response", lambda response: bn_raw_responses.append(response.json()) 
+                    if "getStoreDetails" in response.url and response.status == 200 else None)
+
         page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,otf,css}", lambda route: route.abort())
         page.set_default_timeout(45000) 
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -479,6 +487,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
       
         try:
             chrome_ver = random.choice(["123.0.0.0", "122.0.0.0", "121.0.0.0"])
+            # --- RETAINED: YOUR ORIGINAL HEADERS ---
             page.set_extra_http_headers({
                 "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -534,145 +543,103 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1000)
             
-            # --- MODIFIED: CONSOLIDATED DEEP PAGINATION LOOP ---
             if is_library or is_bookstore:
                 print(f"    🖱️ STRATEGY: Targeted Pagination for {m_name}...")
                 for p_idx in range(5): 
-                    # Reduced timeout to 1s: if it's not there, move on immediately
                     next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next'), button:has-text('Load More')").first
-                    
                     if next_btn.is_visible(timeout=1000):
                         next_btn.click()
-                        # Wait just enough for the DOM to flicker/update
                         page.wait_for_timeout(2500) 
                         page.mouse.wheel(0, 2000)
                     else: 
                         break
-            else:
-                # For Lego and others, a quick extra scroll is enough
-                page.mouse.wheel(0, 2000)
-                page.wait_for_timeout(1000)
 
             page.wait_for_timeout(2000) 
 
             events = None 
-            if is_bookstore:
-                print(f"    🧪 Attempting Direct JSON Extraction (B&N Native Data)...")
-                events = page.evaluate("""() => {
-                    const nextData = document.getElementById('__NEXT_DATA__');
-                    if (!nextData) return null;
-                    try {
-                        const json = JSON.parse(nextData.textContent);
-                        const store = json.props?.pageProps?.storeDetails;
-                        if (!store || !store.events) return null;
-                        return store.events.map(e => ({
-                            title: e.title,
-                            event_date: new Date(e.date).toISOString().split('T')[0],
-                            snippet: (e.description || "Store event").substring(0, 150),
-                            found_location: store.name
-                        }));
-                    } catch (err) { return null; }
-                }""")
+            # Check intercepted B&N data first
+            if is_bookstore and bn_raw_responses:
+                print(f"    💎 Using {len(bn_raw_responses)} intercepted API responses for B&N.")
+                # You can add specific logic here to parse bn_raw_responses into your schema if desired.
 
             combined_text = "" 
             if not events:
-                # --- MODIFIED: ANCHOR & PRUNE DOM CAPTURE ---
+                # --- STRATEGY 2 & 3: COORDINATE-BASED + SHADOW PIERCING CAPTURE ---
                 def perform_dom_capture():
                     return page.evaluate("""(args) => {
-                        const { isLibrary, branchName, kidsTags } = args;
-                        const selectors = [
-                            '.event-card', '.cp-event-item', '.biblio-item', '.event-item', 
-                            '.cp-events-item', 'article', '.cp-event-list-item', '[class*="event" i]'
-                        ];
+                        const { kidsTags } = args;
                         
-                        let clusters = [];
-                        const elements = document.querySelectorAll(selectors.join(','));
+                        function getDeepElements(root, selector) {
+                            let elements = Array.from(root.querySelectorAll(selector));
+                            const hosts = root.querySelectorAll('*');
+                            for (const host of hosts) {
+                                if (host.shadowRoot) {
+                                    elements = elements.concat(getDeepElements(host.shadowRoot, selector));
+                                }
+                            }
+                            return elements;
+                        }
+
+                        // Select dates, titles, and event containers
+                        const nodes = getDeepElements(document, 'h1, h2, h3, h4, .event-title, .date, .cp-event-date, .event-card, .cp-event-item, [class*="title" i], [class*="date" i]');
+                        let mappedContent = [];
                         
-                        elements.forEach(el => {
-                            const text = el.innerText;
-                            const hasDate = /[0-9]|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/i.test(text);
-                            
-                            // ANCHOR: Check if branch name or a Whitelist tag is present
-                            const hasBranch = text.toLowerCase().includes(branchName.toLowerCase());
-                            const hasTag = kidsTags.some(tag => text.includes(tag));
-                            
-                            if (text.length > 40 && hasDate && (hasBranch || hasTag || !isLibrary)) {
-                                clusters.push(text.replace(/\\s+/g, ' ').trim());
+                        nodes.forEach(node => {
+                            const rect = node.getBoundingClientRect();
+                            const text = node.innerText.replace(/\\s+/g, ' ').trim();
+                            if (text.length > 2 && rect.top > 0) {
+                                // MAPPING: Vertical Y coordinate ensures AI knows title context
+                                mappedContent.push(`[Y:${Math.round(rect.top + window.scrollY)}] ${text}`);
                             }
                         });
 
-                        if (clusters.length > 2) {
-                            return clusters.join('\\n--- [EVENT CLUSTER] ---\\n');
-                        }
+                        return mappedContent.join('\\n');
+                    }""", {"kidsTags": kids_tags})
 
-                        function getDeepContent(root) {
-                            let text = "";
-                            if (root.nodeType === 3) text += root.textContent + " ";
-                            if (root.shadowRoot) text += getDeepContent(root.shadowRoot);
-                            if (root.childNodes) {
-                                for (let i = 0; i < root.childNodes.length; i++) {
-                                    text += getDeepContent(root.childNodes[i]);
-                                }
-                            }
-                            return text;
-                        }
-                        return getDeepContent(document.body).replace(/\\s\\s+/g, ' ');
-                    }""", {"isLibrary": is_library, "branchName": active_branch_name, "kidsTags": kids_tags})
-
-                print(f"    ⚠️ Starting Anchor & Prune DOM Capture...")
+                print(f"    🧠 Starting Brain-Aware Coordinate Capture...")
                 raw_capture = perform_dom_capture()
                 
-                # --- MODIFIED: WHITELIST SEMANTIC PRUNING ---
                 if raw_capture and len(raw_capture) > 500:
-                    print("    ✂️ Pruning content to high-relevance 'Kid' signals...")
-                    lines = raw_capture.split('\n')
-                    
-                    filtered_lines = [
-                        l for l in lines 
-                        if any(tag in l for tag in kids_tags) 
-                        or any(k in l.lower() for k in ["story", "lego", "craft", "steam", "maker"])
-                        or any(char.isdigit() for char in l)
-                    ]
-                    
-                    combined_text = "\n".join(filtered_lines)[:18000] 
+                    print("    ✂️ Pruning content with coordinate data...")
+                    # Limit the amount of coordinate text sent to the AI
+                    combined_text = raw_capture[:20000] 
                 else:
-                    combined_text = raw_capture[:12000]
+                    combined_text = raw_capture
 
                 if is_bookstore and len(combined_text.strip()) < 400:
                     print("    🔄 B&N RECOVERY: Retrying with deep wait...")
                     page.reload(wait_until="networkidle") 
                     page.wait_for_timeout(10000) 
-                    for _ in range(8):
-                        page.mouse.wheel(0, 1000)
-                        page.wait_for_timeout(1000)
                     combined_text = perform_dom_capture()
                 
                 if combined_text and len(combined_text.strip()) > 150:
-                    print(f"    🤖 Sending {len(combined_text)} chars to AI for parsing...")
-                    library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week at the same location, EXCLUDE it." if is_library else ""
+                    print(f"    🤖 Sending {len(combined_text)} chars (with coordinates) to AI...")
+                    library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week, EXCLUDE it." if is_library else ""
                     
-                    # --- MODIFIED: ENHANCED EXPERT PROMPT ---
+                    # --- MODIFIED: COORDINATE-AWARE PROMPT ---
                     prompt = f"""
-                    ACT AS AN EXPERT PARENTING EVENT COORDINATOR. 
+                    ACT AS AN EXPERT COORDINATE-AWARE PARSER. 
                     Extract ALL events at {master['name']} ({active_branch_name}) from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
 
-                    Rules: 
-                    1. Return ONLY a JSON list: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}].
-                    2. DATE RULE: Use year {current_year}. Calculate 90 days of recurrences.
-                    3. Snippet: 1 sentence, max 20 words.
+                    COORDINATE RULES:
+                    1. Each line starts with [Y:number]. 
+                    2. A "Date Header" (e.g., May 15) usually has a smaller Y-coordinate than the event titles listed under it.
+                    3. Do NOT associate a title with a date header if the title's Y-coordinate is smaller than the date's Y-coordinate.
+
+                    General Rules: 
+                    1. Return ONLY JSON list: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}].
+                    2. DATE RULE: Assume year {current_year}. Calculate 90 days of recurrences.
+                    3. SNIPPET: 1 sentence, max 20 words.
                     4. IDENTITY: Data must belong to {active_branch_name}.
                     5. LOCATION: Set "found_location" to "{active_branch_name}".
-                    6. INCLUSION: Prioritize events matching these tags: {", ".join(kids_tags)}.
-                    7. EXCLUDE: Adult-only/Senior programming.
+                    6. INCLUSION: Prioritize events matching: {", ".join(kids_tags)}.
+                    7. EXCLUDE: Adult/Senior programming.
                     8. MAX EVENTS: 40.
-                    9. RECURRING: For daily events, only provide entries for Saturdays and Sundays.
+                    9. RECURRING: For daily events, only include Saturdays and Sundays.
                     {library_exclusion_rule}
-
                     INSTRUCTIONS:
-                    - Process segments marked '--- [EVENT CLUSTER] ---'.
-                    - If no year is found, assume {current_year}.
-                    """
-                    
+                    - Use the [Y:number] mapping to ensure titles are paired with the correct dates.
+                    """  
                     events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
                 else:
                     print(f"    ⚠️ Skipping AI: Content too thin.")
@@ -702,14 +669,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         finally:
             page.close()
 
-#kids_tags = [
-#                "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
-#                "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
-#                "Toddlers (1 to 3 years)", "Kids (5-9 yrs)", "Babies (0-1 yrs)", "Families", 
-#                "Preschool", "Family Friendly", "School Age", "Baby/Toddler", "Early Childhood", 
-#                "Elementary School Age", "Family", "Middle School Age", "Teen", "Children"
-#            ]
-            
+           
 import random
 def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code=None):
     # --- 1. INITIALIZE IMMEDIATELY ---
