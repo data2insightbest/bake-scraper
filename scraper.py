@@ -423,8 +423,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     is_library = "library" in m_name.lower()
     is_bookstore = "barnes" in m_name.lower()
     is_lego = "lego" in m_name.lower()
+    is_discovery = "discovery" in m_name.lower() or mode == "discovery"
 
-    # --- ADDED: EXHAUSTIVE WHITELIST ---
     kids_tags = [
         "Babies & Toddler", "Kids", "Teens", "Preschoolers", "Teens (13 to 18 years)", 
         "Children (6 to 9 years)", "Preschoolers (3-5 years)", "Tweens (9 to 12 years)", 
@@ -439,13 +439,21 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     current_year = today.year
     range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
 
-    # --- MODIFIED: Ensure Libraries also process branch by branch to allow session wiping ---
     branches_to_process = target_branches if (mode == "specific" and (is_bookstore or is_lego or is_library)) else [None]
 
     for current_branch in branches_to_process:
+        active_zip = current_branch.get('zip_code') if current_branch else zip_code
+        active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
+
+        # --- FIX 2: STRATEGY - WIPING SESSION/COOKIES ---
+        if is_library:
+            print(f"    🧼 STRATEGY: Wiping session/cookies for {active_branch_name}...")
+            context.clear_cookies()
+            context.clear_permissions()
+
         page = context.new_page()
 
-        # --- STRATEGY 1: B&N NETWORK INTERCEPTOR ---
+        # --- FIX 1: B&N NETWORK INTERCEPTOR ---
         bn_raw_responses = []
         if is_bookstore:
             page.on("response", lambda response: bn_raw_responses.append(response.json()) 
@@ -455,14 +463,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         page.set_default_timeout(45000) 
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
       
-        active_zip = current_branch.get('zip_code') if current_branch else zip_code
-        active_branch_name = current_branch.get('name', 'Main') if current_branch else "System"
- 
-        current_url = master['url'] if master['url'].startswith('http') else f'https://{master["url"]}' 
+        current_url = url
         if is_library:
             if not any(word in current_url.lower() for word in ["calendar", "events", "biblio", "program"]):
                 current_url = current_url.rstrip('/') + "/events"
-                print(f"    🚀 LIBRARY STRATEGY: Appending /events to path for {active_branch_name}")
+                print(f"    🚀 LIBRARY STRATEGY: Appending /events for {active_branch_name}")
                 
         if is_bookstore:
             BN_ID_MAP = {
@@ -480,12 +485,12 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
             if store_id:
                 current_url = f"https://stores.barnesandnoble.com/store/{store_id}?view=list&type=event"
-                print(f"    🚀 STRATEGY: Direct ID Injection for {active_branch_name} (ID: {store_id})")
+                print(f"    🚀 STRATEGY: Direct ID Injection (ID: {store_id})")
             elif active_zip:
                 current_url = f"https://stores.barnesandnoble.com/search?searchTerm={active_zip}&view=list"
-                print(f"    🚀 STRATEGY: Search Parameter Injection for {active_zip}")
       
         try:
+            events = None
             chrome_ver = random.choice(["123.0.0.0", "122.0.0.0", "121.0.0.0"])
             page.set_extra_http_headers({
                 "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36",
@@ -495,32 +500,26 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             }) 
                     
             print(f"    🌐 Navigating to {m_name} ({active_branch_name})...")
-            
             page.goto(current_url, wait_until="domcontentloaded", timeout=90000)
             page.wait_for_timeout(7000) 
             
             if is_bookstore:
                 try:
-                    # MODIFIED: More aggressive wait for B&N specific containers
-                    page.wait_for_selector(".store-details-events-section, .event-card-details, .event-list-item", timeout=15000)
-                    close_btn = page.locator("button[aria-label*='Close' i], .modal-close, #close-icon, button:has-text('No Thanks'), .bx-close-x-adaptive").first
+                    page.wait_for_selector(".store-details-events-section, .event-card-details", timeout=15000)
+                    close_btn = page.locator("button[aria-label*='Close' i], .modal-close, button:has-text('No Thanks')").first
                     if close_btn.is_visible(timeout=3000):
                         close_btn.click()
-                        print("    ✨ Closed overlay/modal.")
-                        page.wait_for_timeout(1000) 
                 except: pass
             
-            # --- STRATEGY 4: POP-UP TRIGGERING ---
+            # --- FIX 3: POP-UP TRIGGERING (Hydration) ---
             if is_library or is_bookstore:
                 try:
-                    print(f"    🖱️ STRATEGY: Triggering detail pop-ups for {active_branch_name}...")
-                    # Finds buttons like "View Details", "More Info", or "Quick View"
+                    print(f"    🖱️ STRATEGY: Triggering detail pop-ups for hydration...")
                     popups = page.locator("button:has-text('Details'), a:has-text('View More'), .event-card-link").all()
-                    for btn in popups[:5]: # Limit to first 5 to avoid infinite loops
+                    for btn in popups[:8]:
                         if btn.is_visible():
                             btn.click()
-                            page.wait_for_timeout(1500) # Wait for text to appear
-                            # If there's a close button in the modal, click it to move to next
+                            page.wait_for_timeout(1200)
                             modal_close = page.locator(".modal-close, [aria-label*='Close']").first
                             if modal_close.is_visible(): modal_close.click()
                 except: pass
@@ -528,57 +527,45 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             if (is_bookstore or is_lego) and active_zip:
                 try:
                     if is_bookstore:
-                        # MODIFIED: Force a click on the Events tab if we aren't seeing cards
                         if "type=event" not in page.url or not page.locator(".event-card-details").first.is_visible():
-                            event_tab = page.locator("a[href*='type=event'], #store-details-events-tab, button:has-text('Events')").first
+                            event_tab = page.locator("a[href*='type=event'], button:has-text('Events')").first
                             if event_tab.is_visible(timeout=3000):
                                 event_tab.click()
                                 page.wait_for_timeout(5000)
 
-                        print(f"    🖱️ Scrolling to trigger B&N event loading...")
-                        for _ in range(5):
-                            page.mouse.wheel(0, 1000)
-                            page.wait_for_timeout(1000)
-
                     elif is_lego:
-                        search_field = page.locator("input[placeholder*='zip' i], input[placeholder*='City' i], #store-search-input").first
+                        search_field = page.locator("input[placeholder*='zip' i], #store-search-input").first
                         if search_field.is_visible(timeout=5000):
                             search_field.fill(str(active_zip))
                             page.keyboard.press("Enter")
                             time.sleep(3)
-                            select_btn = page.locator("text='Select This Store', button:has-text('Store Details'), .store-card button").first
+                            select_btn = page.locator("text='Select This Store', button:has-text('Store Details')").first
                             if select_btn.is_visible(timeout=5000):
                                 select_btn.click(force=True)
                                 time.sleep(5)
-                except Exception as e:
-                    print(f"    ⚠️ Store selection failed for {active_branch_name}: {e}")
+                except: pass
 
             print(f"    🖱️ Scrolling {m_name}...")
-            scroll_count = 5 if (is_library or is_bookstore) else 2 
+            scroll_count = 6 if (is_library or is_bookstore) else 2 
             for _ in range(scroll_count):
                 page.mouse.wheel(0, 2000)
                 page.wait_for_timeout(1000)
             
             if is_library or is_bookstore:
-                print(f"    🖱️ STRATEGY: Targeted Pagination for {m_name}...")
                 for p_idx in range(5): 
-                    next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next'), button:has-text('Load More')").first
+                    next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, button:has-text('Load More')").first
                     if next_btn.is_visible(timeout=1000):
                         next_btn.click()
                         page.wait_for_timeout(2500) 
                         page.mouse.wheel(0, 2000)
-                    else: 
-                        break
-
-            page.wait_for_timeout(2000) 
-
-            events = None 
-            combined_text = "" 
+                    else: break
 
             # --- HYBRID CAPTURE LOGIC ---
+            combined_text = ""
             if is_library or is_bookstore:
+                # --- FIX 1: DEEP SHADOW DOM CAPTURE for Complex Sites ---
                 def perform_dom_capture():
-                    return page.evaluate("""(args) => {
+                    return page.evaluate("""() => {
                         function getDeepElements(root, selector) {
                             let elements = Array.from(root.querySelectorAll(selector));
                             const hosts = root.querySelectorAll('*');
@@ -589,7 +576,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             }
                             return elements;
                         }
-                        const nodes = getDeepElements(document, 'h1, h2, h3, h4, .event-title, .date, .cp-event-date, .event-card, .cp-event-item, [class*="title" i], [class*="date" i], .event-detail, .event-list-item');
+                        const nodes = getDeepElements(document, 'h1, h2, h3, .event-title, .date, .event-card, .event-detail, .event-list-item');
                         let mappedContent = [];
                         nodes.forEach(node => {
                             const rect = node.getBoundingClientRect();
@@ -599,83 +586,68 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             }
                         });
                         return mappedContent.join('\\n');
-                    }""", {"kidsTags": kids_tags})
-
-                print(f"    🧠 Starting Brain-Aware Coordinate Capture for {m_name}...")
+                    }""")
                 combined_text = perform_dom_capture()
+                
+                # RESTORED: B&N RECOVERY BLOCK
+                if is_bookstore and len(combined_text.strip()) < 400:
+                    print("    🔄 B&N RECOVERY: Retrying with deep wait...")
+                    page.reload(wait_until="networkidle") 
+                    page.wait_for_timeout(10000) 
+                    combined_text = perform_dom_capture()
             else:
+                # --- STANDARD CAPTURE for Lego, Discovery, and simpler sites ---
                 print(f"    📄 Using Standard Text Capture for {m_name}...")
                 combined_text = page.evaluate("document.body.innerText")
 
-            if is_bookstore and len(combined_text.strip()) < 400:
-                print("    🔄 B&N RECOVERY: Retrying with deep wait...")
-                page.reload(wait_until="networkidle") 
-                page.wait_for_timeout(10000) 
-                combined_text = perform_dom_capture()
-            
-            if combined_text and len(combined_text.strip()) > 150:
+            # --- FIX 6: DISCOVERY THRESHOLD ---
+            min_len = 50 if is_discovery else 150
+
+            if combined_text and len(combined_text.strip()) > min_len:
                 print(f"    🤖 Sending {len(combined_text)} chars to AI...")
                 
-                # --- STRATEGY 3: ENFORCING SAT/SUN FOR LEGO & DAILY EVENTS ---
-                # Modified Rule 9 to catch consecutive titles
-                recurrence_logic = "9. RECURRING: If the SAME event title appears on 3 or more consecutive days (Daily Events like LEGO admission), ONLY include the Saturday and Sunday dates."
+                # --- FIX 5: RECURRING LOGIC ---
+                recurrence_logic = "9. RECURRING: If the SAME event (like LEGO admission) appears on 3+ consecutive days, ONLY include Sat/Sun."
+                library_exclusion = "11. LIBRARY EXCLUSION: If same title happens 3+ times in a single week, EXCLUDE." if is_library else ""
                 
-                library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week, EXCLUDE it." if is_library else ""
-                
-                coord_instructions = """
-                    COORDINATE RULES (Apply only if [Y:number] is present):
-                    1. Each line starts with [Y:number]. 
-                    2. A "Date Header" usually has a smaller Y-coordinate than events under it.
-                    3. Do NOT associate a title with a date header if the title's Y-coordinate is smaller than the date's.
-                """ if (is_library or is_bookstore) else ""
-
+                # --- FIX 4: IDENTITY NORMALIZATION ---
                 prompt = f"""
                     ACT AS AN EXPERT EVENT PARSER. 
-                    Extract ALL events at {master['name']} ({active_branch_name}) from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
+                    Extract ALL events at {active_branch_name} from {today.strftime('%B %Y')}.
 
-                    {coord_instructions}
-
-                    General Rules: 
+                    RULES:
                     1. Return ONLY JSON list: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}].
-                    2. DATE RULE: Assume year {current_year}. Calculate 90 days of recurrences.
-                    3. SNIPPET: 1 sentence, max 20 words.
-                    4. IDENTITY: Data must belong to {active_branch_name}.
-                    5. LOCATION: Set "found_location" to "{active_branch_name}".
-                    6. INCLUSION: Prioritize events matching: {", ".join(kids_tags)}.
-                    7. EXCLUDE: Adult/Senior programming.
-                    8. MAX EVENTS: 40.
-                    {recurrence_logic}
-                    {library_exclusion_rule}
+                    2. IDENTITY: Set 'found_location' to '{active_branch_name}'. Ensure data belongs to this specific branch.
+                    3. {recurrence_logic}
+                    4. {library_exclusion}
+                    5. INCLUSION: Prioritize events matching: {", ".join(kids_tags)}.
+                    6. DATE RULE: Assume year {current_year}. Calculate 90 days of recurrences.
+                    7. SNIPPET: 1 sentence, max 20 words.
+                    8. EXCLUDE: Adult/Senior programming.
+                    9. MAX EVENTS: 40.
                     """  
                 events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
             else:
-                print(f"    ⚠️ Skipping AI: Content too thin.")
-        
+                print(f"    ⚠️ Skipping AI: Content too thin ({len(combined_text) if combined_text else 0} chars).")
+
             if events:
-                exclude_list = ["adult", "senior", "tax prep", "citizenship test"]
+                exclude_list = ["adult", "senior", "tax prep", "citizenship"]
                 filtered_events = [
                     ev for ev in events 
-                    if not any(word in (ev.get('title', '') + " " + ev.get('snippet', '')).lower() for word in exclude_list) 
+                    if not any(word in (ev.get('title', '') + " " + ev.get('snippet', '')).lower() for word in exclude_list)
                     or any(tag.lower() in (ev.get('title', '') + " " + ev.get('snippet', '')).lower() for tag in kids_tags)
                 ]
                 
                 if filtered_events:
+                    if is_discovery: 
+                        for ev in filtered_events: ev['is_adhoc'] = True
+                        
                     targets = [current_branch] if current_branch else target_branches
                     save_events(filtered_events, targets, midnight, master, mode)
                     print(f"    ✅ Successfully found {len(filtered_events)} events for {active_branch_name}.")
-            else:
-                print(f"    ⚠️ No events extracted for {active_branch_name}.")
-
-            # --- STRATEGY 2: SESSION WIPING FOR LIBRARIES ---
-            if is_library:
-                print(f"    🧼 STRATEGY: Wiping session/cookies to prevent branch stickiness...")
-                context.clear_cookies()
-                context.clear_permissions()
 
             if current_branch != branches_to_process[-1]:
-                sleep_time = random.randint(12, 20)
-                print(f"    ⏳ Spacing out requests ({sleep_time}s)...")
-                time.sleep(sleep_time)
+                time.sleep(random.randint(12, 20))
 
         except Exception as e:
             print(f"❌ Error scraping {m_name} - {active_branch_name}: {e}")
