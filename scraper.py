@@ -439,7 +439,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
     current_year = today.year
     range_str = f"{today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}"
 
-    branches_to_process = target_branches if (mode == "specific" and (is_bookstore or is_lego)) else [None]
+    # --- MODIFIED: Ensure Libraries also process branch by branch to allow session wiping ---
+    branches_to_process = target_branches if (mode == "specific" and (is_bookstore or is_lego or is_library)) else [None]
 
     for current_branch in branches_to_process:
         page = context.new_page()
@@ -500,7 +501,8 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             
             if is_bookstore:
                 try:
-                    page.wait_for_selector(".store-details-events-section, .event-card-details", timeout=15000)
+                    # MODIFIED: More aggressive wait for B&N specific containers
+                    page.wait_for_selector(".store-details-events-section, .event-card-details, .event-list-item", timeout=15000)
                     close_btn = page.locator("button[aria-label*='Close' i], .modal-close, #close-icon, button:has-text('No Thanks'), .bx-close-x-adaptive").first
                     if close_btn.is_visible(timeout=3000):
                         close_btn.click()
@@ -508,14 +510,30 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                         page.wait_for_timeout(1000) 
                 except: pass
             
+            # --- STRATEGY 4: POP-UP TRIGGERING ---
+            if is_library or is_bookstore:
+                try:
+                    print(f"    🖱️ STRATEGY: Triggering detail pop-ups for {active_branch_name}...")
+                    # Finds buttons like "View Details", "More Info", or "Quick View"
+                    popups = page.locator("button:has-text('Details'), a:has-text('View More'), .event-card-link").all()
+                    for btn in popups[:5]: # Limit to first 5 to avoid infinite loops
+                        if btn.is_visible():
+                            btn.click()
+                            page.wait_for_timeout(1500) # Wait for text to appear
+                            # If there's a close button in the modal, click it to move to next
+                            modal_close = page.locator(".modal-close, [aria-label*='Close']").first
+                            if modal_close.is_visible(): modal_close.click()
+                except: pass
+
             if (is_bookstore or is_lego) and active_zip:
                 try:
                     if is_bookstore:
-                        if "type=event" not in page.url:
-                            event_tab = page.locator("a[href*='type=event'], #store-details-events-tab").first
+                        # MODIFIED: Force a click on the Events tab if we aren't seeing cards
+                        if "type=event" not in page.url or not page.locator(".event-card-details").first.is_visible():
+                            event_tab = page.locator("a[href*='type=event'], #store-details-events-tab, button:has-text('Events')").first
                             if event_tab.is_visible(timeout=3000):
                                 event_tab.click()
-                                page.wait_for_timeout(3000)
+                                page.wait_for_timeout(5000)
 
                         print(f"    🖱️ Scrolling to trigger B&N event loading...")
                         for _ in range(5):
@@ -559,7 +577,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
 
             # --- HYBRID CAPTURE LOGIC ---
             if is_library or is_bookstore:
-                # --- CHANGE 1: APPLY COORDINATES ONLY TO LIBRARIES/B&N ---
                 def perform_dom_capture():
                     return page.evaluate("""(args) => {
                         function getDeepElements(root, selector) {
@@ -572,13 +589,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             }
                             return elements;
                         }
-                        // CHANGE 2: Expanded selector to ensure "thin" content isn't missed
-                        const nodes = getDeepElements(document, 'h1, h2, h3, h4, .event-title, .date, .cp-event-date, .event-card, .cp-event-item, [class*="title" i], [class*="date" i], .event-detail');
+                        const nodes = getDeepElements(document, 'h1, h2, h3, h4, .event-title, .date, .cp-event-date, .event-card, .cp-event-item, [class*="title" i], [class*="date" i], .event-detail, .event-list-item');
                         let mappedContent = [];
                         nodes.forEach(node => {
                             const rect = node.getBoundingClientRect();
                             const text = node.innerText.replace(/\\s+/g, ' ').trim();
-                            // CHANGE 3: Removed rect.top > 0 to capture events above/below current view
                             if (text.length > 2) {
                                 mappedContent.push(`[Y:${Math.round(rect.top + window.scrollY)}] ${text}`);
                             }
@@ -589,7 +604,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 print(f"    🧠 Starting Brain-Aware Coordinate Capture for {m_name}...")
                 combined_text = perform_dom_capture()
             else:
-                # --- CHANGE 4: REVERT TO STANDARD CAPTURE FOR OTHERS (Slime, Lego, etc.) ---
                 print(f"    📄 Using Standard Text Capture for {m_name}...")
                 combined_text = page.evaluate("document.body.innerText")
 
@@ -601,9 +615,13 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             
             if combined_text and len(combined_text.strip()) > 150:
                 print(f"    🤖 Sending {len(combined_text)} chars to AI...")
+                
+                # --- STRATEGY 3: ENFORCING SAT/SUN FOR LEGO & DAILY EVENTS ---
+                # Modified Rule 9 to catch consecutive titles
+                recurrence_logic = "9. RECURRING: If the SAME event title appears on 3 or more consecutive days (Daily Events like LEGO admission), ONLY include the Saturday and Sunday dates."
+                
                 library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week, EXCLUDE it." if is_library else ""
                 
-                # --- CHANGE 5: CONDITIONAL PROMPT INSTRUCTIONS ---
                 coord_instructions = """
                     COORDINATE RULES (Apply only if [Y:number] is present):
                     1. Each line starts with [Y:number]. 
@@ -626,7 +644,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     6. INCLUSION: Prioritize events matching: {", ".join(kids_tags)}.
                     7. EXCLUDE: Adult/Senior programming.
                     8. MAX EVENTS: 40.
-                    9. RECURRING: For daily events, only include Saturdays and Sundays.
+                    {recurrence_logic}
                     {library_exclusion_rule}
                     """  
                 events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
@@ -648,6 +666,12 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             else:
                 print(f"    ⚠️ No events extracted for {active_branch_name}.")
 
+            # --- STRATEGY 2: SESSION WIPING FOR LIBRARIES ---
+            if is_library:
+                print(f"    🧼 STRATEGY: Wiping session/cookies to prevent branch stickiness...")
+                context.clear_cookies()
+                context.clear_permissions()
+
             if current_branch != branches_to_process[-1]:
                 sleep_time = random.randint(12, 20)
                 print(f"    ⏳ Spacing out requests ({sleep_time}s)...")
@@ -657,7 +681,7 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             print(f"❌ Error scraping {m_name} - {active_branch_name}: {e}")
         finally:
             page.close()
-           
+
 import random
 def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code=None):
     # --- 1. INITIALIZE IMMEDIATELY ---
