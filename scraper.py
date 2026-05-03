@@ -535,16 +535,23 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                 page.wait_for_timeout(1000)
             
             # --- MODIFIED: CONSOLIDATED DEEP PAGINATION LOOP ---
-            print(f"    🖱️ STRATEGY: Aggressive Pagination...")
-            for p_idx in range(6): # Increased range for deeper discovery
-                # Try clicking any form of "Next" or "Load More"
-                next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next'), button:has-text('Load More'), button:has-text('Show More')").first
-                if next_btn.is_visible(timeout=3000):
-                    next_btn.click()
-                    page.wait_for_timeout(4000)
-                    page.mouse.wheel(0, 2000)
-                else: 
-                    break
+            if is_library or is_bookstore:
+                print(f"    🖱️ STRATEGY: Targeted Pagination for {m_name}...")
+                for p_idx in range(5): 
+                    # Reduced timeout to 1s: if it's not there, move on immediately
+                    next_btn = page.locator("button[aria-label*='Next' i], .pagination-next, a:has-text('Next'), button:has-text('Load More')").first
+                    
+                    if next_btn.is_visible(timeout=1000):
+                        next_btn.click()
+                        # Wait just enough for the DOM to flicker/update
+                        page.wait_for_timeout(2500) 
+                        page.mouse.wheel(0, 2000)
+                    else: 
+                        break
+            else:
+                # For Lego and others, a quick extra scroll is enough
+                page.mouse.wheel(0, 2000)
+                page.wait_for_timeout(1000)
 
             page.wait_for_timeout(2000) 
 
