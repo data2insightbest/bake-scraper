@@ -445,7 +445,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
         page = context.new_page()
 
         # --- STRATEGY 1: B&N NETWORK INTERCEPTOR ---
-        # Capture raw data from B&N's internal API before it hits the UI
         bn_raw_responses = []
         if is_bookstore:
             page.on("response", lambda response: bn_raw_responses.append(response.json()) 
@@ -487,7 +486,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
       
         try:
             chrome_ver = random.choice(["123.0.0.0", "122.0.0.0", "121.0.0.0"])
-            # --- RETAINED: YOUR ORIGINAL HEADERS ---
             page.set_extra_http_headers({
                 "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -557,18 +555,13 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             page.wait_for_timeout(2000) 
 
             events = None 
-            # Check intercepted B&N data first
-            if is_bookstore and bn_raw_responses:
-                print(f"    💎 Using {len(bn_raw_responses)} intercepted API responses for B&N.")
-                # You can add specific logic here to parse bn_raw_responses into your schema if desired.
-
             combined_text = "" 
-            if not events:
-                # --- STRATEGY 2 & 3: COORDINATE-BASED + SHADOW PIERCING CAPTURE ---
+
+            # --- HYBRID CAPTURE LOGIC ---
+            if is_library or is_bookstore:
+                # --- CHANGE 1: APPLY COORDINATES ONLY TO LIBRARIES/B&N ---
                 def perform_dom_capture():
                     return page.evaluate("""(args) => {
-                        const { kidsTags } = args;
-                        
                         function getDeepElements(root, selector) {
                             let elements = Array.from(root.querySelectorAll(selector));
                             const hosts = root.querySelectorAll('*');
@@ -579,52 +572,50 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                             }
                             return elements;
                         }
-
-                        // Select dates, titles, and event containers
-                        const nodes = getDeepElements(document, 'h1, h2, h3, h4, .event-title, .date, .cp-event-date, .event-card, .cp-event-item, [class*="title" i], [class*="date" i]');
+                        // CHANGE 2: Expanded selector to ensure "thin" content isn't missed
+                        const nodes = getDeepElements(document, 'h1, h2, h3, h4, .event-title, .date, .cp-event-date, .event-card, .cp-event-item, [class*="title" i], [class*="date" i], .event-detail');
                         let mappedContent = [];
-                        
                         nodes.forEach(node => {
                             const rect = node.getBoundingClientRect();
                             const text = node.innerText.replace(/\\s+/g, ' ').trim();
-                            if (text.length > 2 && rect.top > 0) {
-                                // MAPPING: Vertical Y coordinate ensures AI knows title context
+                            // CHANGE 3: Removed rect.top > 0 to capture events above/below current view
+                            if (text.length > 2) {
                                 mappedContent.push(`[Y:${Math.round(rect.top + window.scrollY)}] ${text}`);
                             }
                         });
-
                         return mappedContent.join('\\n');
                     }""", {"kidsTags": kids_tags})
 
-                print(f"    🧠 Starting Brain-Aware Coordinate Capture...")
-                raw_capture = perform_dom_capture()
-                
-                if raw_capture and len(raw_capture) > 500:
-                    print("    ✂️ Pruning content with coordinate data...")
-                    # Limit the amount of coordinate text sent to the AI
-                    combined_text = raw_capture[:20000] 
-                else:
-                    combined_text = raw_capture
+                print(f"    🧠 Starting Brain-Aware Coordinate Capture for {m_name}...")
+                combined_text = perform_dom_capture()
+            else:
+                # --- CHANGE 4: REVERT TO STANDARD CAPTURE FOR OTHERS (Slime, Lego, etc.) ---
+                print(f"    📄 Using Standard Text Capture for {m_name}...")
+                combined_text = page.evaluate("document.body.innerText")
 
-                if is_bookstore and len(combined_text.strip()) < 400:
-                    print("    🔄 B&N RECOVERY: Retrying with deep wait...")
-                    page.reload(wait_until="networkidle") 
-                    page.wait_for_timeout(10000) 
-                    combined_text = perform_dom_capture()
+            if is_bookstore and len(combined_text.strip()) < 400:
+                print("    🔄 B&N RECOVERY: Retrying with deep wait...")
+                page.reload(wait_until="networkidle") 
+                page.wait_for_timeout(10000) 
+                combined_text = perform_dom_capture()
+            
+            if combined_text and len(combined_text.strip()) > 150:
+                print(f"    🤖 Sending {len(combined_text)} chars to AI...")
+                library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week, EXCLUDE it." if is_library else ""
                 
-                if combined_text and len(combined_text.strip()) > 150:
-                    print(f"    🤖 Sending {len(combined_text)} chars (with coordinates) to AI...")
-                    library_exclusion_rule = "11. LIBRARY EXCLUSION: If the SAME event title happens 3 or more times within a single week, EXCLUDE it." if is_library else ""
-                    
-                    # --- MODIFIED: COORDINATE-AWARE PROMPT ---
-                    prompt = f"""
-                    ACT AS AN EXPERT COORDINATE-AWARE PARSER. 
+                # --- CHANGE 5: CONDITIONAL PROMPT INSTRUCTIONS ---
+                coord_instructions = """
+                    COORDINATE RULES (Apply only if [Y:number] is present):
+                    1. Each line starts with [Y:number]. 
+                    2. A "Date Header" usually has a smaller Y-coordinate than events under it.
+                    3. Do NOT associate a title with a date header if the title's Y-coordinate is smaller than the date's.
+                """ if (is_library or is_bookstore) else ""
+
+                prompt = f"""
+                    ACT AS AN EXPERT EVENT PARSER. 
                     Extract ALL events at {master['name']} ({active_branch_name}) from {today.strftime('%B %d, %Y')} to {future_date.strftime('%B %d, %Y')}.
 
-                    COORDINATE RULES:
-                    1. Each line starts with [Y:number]. 
-                    2. A "Date Header" (e.g., May 15) usually has a smaller Y-coordinate than the event titles listed under it.
-                    3. Do NOT associate a title with a date header if the title's Y-coordinate is smaller than the date's Y-coordinate.
+                    {coord_instructions}
 
                     General Rules: 
                     1. Return ONLY JSON list: [{{"title": "...", "event_date": "YYYY-MM-DD", "snippet": "...", "found_location": "..."}}].
@@ -637,13 +628,11 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
                     8. MAX EVENTS: 40.
                     9. RECURRING: For daily events, only include Saturdays and Sundays.
                     {library_exclusion_rule}
-                    INSTRUCTIONS:
-                    - Use the [Y:number] mapping to ensure titles are paired with the correct dates.
                     """  
-                    events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
-                else:
-                    print(f"    ⚠️ Skipping AI: Content too thin.")
-            
+                events = generate_with_retry(prompt, combined_text, f"{m_name}-{active_branch_name}")        
+            else:
+                print(f"    ⚠️ Skipping AI: Content too thin.")
+        
             if events:
                 exclude_list = ["adult", "senior", "tax prep", "citizenship test"]
                 filtered_events = [
@@ -668,7 +657,6 @@ def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code
             print(f"❌ Error scraping {m_name} - {active_branch_name}: {e}")
         finally:
             page.close()
-
            
 import random
 def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code=None):
