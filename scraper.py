@@ -269,7 +269,7 @@ def save_events(events, target_branches, midnight, master, mode):
                     'title': title,
                     'event_date': date_str,
                     'snippet': snippet,
-                    'category_name': master.get('category_name') or 'Special Activity',
+                    'category_name': master.get('category') or 'Special Activity',
                     'zip_code': branch.get('zip_code'),
                     'window_type': window,
                     'specificity_score': spec_score,
@@ -301,25 +301,26 @@ def generate_with_retry(prompt, text_content, context_name="General"):
     Combines your original trailing-comma fix with a new salvage step 
     to handle truncated text (e.g., 'Welcome spr...').
     """
-    # GATEKEEPER: If the text is too thin (like the 216-char B&N failure), don't waste API quota
-    if len(text_content.strip()) < 500:
+    # GATEKEEPER: Bypass the 500-char limit ONLY for Discovery mode
+    # For Discovery, we are asking the AI for its internal knowledge, not scraping a page.
+    if context_name != "Discovery" and len(text_content.strip()) < 500:
         print(f"    ⚠️ Skipping API for {context_name}: Content too thin ({len(text_content)} chars).")
         return []
         
     for attempt in range(3):                
         try:
             # --- HIGHLIGHTED CHANGE 1: TPM SCALING ---
-            # Instead of a fixed 30k, we reduce data on retries to bypass Token Limits.
-            # Attempt 0: 30k chars | Attempt 1: 15k chars | Attempt 2: 7.5k chars
             content_limit = 30000 // (2**attempt)
             
             # --- HIGHLIGHTED CHANGE 2: AGGRESSIVE BACKOFF ---
-            # Linear backoff was too short for new 2026 safety throttles.
             time.sleep(5 + (attempt * 5)) 
             
+            # If discovery, we don't need to slice text_content as it is just a short string like "Bay Area"
+            ai_input_text = text_content if context_name == "Discovery" else text_content[:content_limit]
+
             response = client.models.generate_content(
                 model='gemini-2.0-flash', 
-                contents=[prompt, text_content[:content_limit]] # Use scaled limit
+                contents=[prompt, ai_input_text]
             )
             
             if not response or not hasattr(response, 'text') or not response.text:
@@ -376,10 +377,8 @@ def generate_with_retry(prompt, text_content, context_name="General"):
         except Exception as e:
             err_msg = str(e).lower()
             if "429" in err_msg:
-                # --- HIGHLIGHTED CHANGE 3: EXTENDED WAIT ---
-                # Paid tier 429s require a significant reset period.
                 wait = (attempt + 1) * 45 
-                print(f"    ⏳ Rate limited (TPM). Sleeping {wait}s and reducing content...")
+                print(f"    ⏳ Rate limited (TPM). Sleeping {wait}s...")
                 time.sleep(wait)
             else:
                 print(f"    ❌ AI Error for {context_name}: {e}")
@@ -387,20 +386,37 @@ def generate_with_retry(prompt, text_content, context_name="General"):
 
     return []
 
-def get_daily_batch(limit=24):
-    """Reverted logic to fix nulls_first crash while keeping ID sorting."""
-    three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
-    # 1. Sort by last_scraped_at (NULLs naturally group together)
-    # 2. Sort by ID (Ensures ID 1, 2, 3 come first within the NULL group)
-    res = supabase.table("places")\
+def get_daily_batch(limit=None):
+    """
+    Fetches places for scraping. 
+    If limit is None, it fetches all master records.
+    """
+    query = supabase.table("places")\
         .select("*")\
         .eq("is_master", True)\
-        .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}")\
         .order("last_scraped_at")\
-        .order("id")\
-        .limit(limit)\
-        .execute()
+        .order("id")
+
+    if limit:
+        query = query.limit(limit)
+
+    res = query.execute()
     return res.data
+    
+#def get_daily_batch(limit=24):
+#    """Reverted logic to fix nulls_first crash while keeping ID sorting."""
+#    three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
+#    # 1. Sort by last_scraped_at (NULLs naturally group together)
+#    # 2. Sort by ID (Ensures ID 1, 2, 3 come first within the NULL group)
+#    res = supabase.table("places")\
+#        .select("*")\
+#        .eq("is_master", True)\
+#        .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}")\
+#        .order("last_scraped_at")\
+#        .order("id")\
+#        .limit(limit)\
+#        .execute()
+#    return res.data
  
 #def get_daily_batch(limit=24):
 #    """Modified to strictly test IDs 1 through 5 only."""
@@ -1028,12 +1044,19 @@ def run_gemini_discovery(midnight):
     
     print(f"🧠 Running Discovery for Bay Area festivals ({range_str})...")
     
-    prompt = f"Find 8 major kids festivals in the SF Bay Area happening between {range_str}. Return JSON: [title, event_date(YYYY-MM-DD), price_text, snippet]."
+    # We pass "Discovery" as the context_name so generate_with_retry skips the length gate
+    prompt = f"Find 10 major kids festivals in the SF Bay Area happening between {range_str}. Return JSON: [title, event_date(YYYY-MM-DD), price_text, snippet]."
     
     events = generate_with_retry(prompt, "Bay Area", "Discovery")
+    
     if events:
-        # Use ID 9999 to prevent collision with Academy of Sciences (ID 1)
-        discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category": "Special Events"}
+        # Added 'category_name' to match what save_events looks for
+        discovery_master = {
+            "id": 9999, 
+            "name": "Bay Area Pop-up", 
+            "category_name": "Special Events" 
+        }
+        # Ensure target_branches uses the same ID
         save_events(events, [{"id": 9999, "name": "Bay Area Pop-up", "zip_code": "94103"}], midnight, discovery_master, "global")
 
 def run_scraper():
@@ -1044,61 +1067,58 @@ def run_scraper():
     from playwright.sync_api import sync_playwright
 
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    masters = get_daily_batch(limit=24)
+    
+    # --- CHANGE HERE: Increase limit to none to cover all current and future places ---
+    masters = get_daily_batch(limit=None) 
     if not masters: return
 
     with sync_playwright() as p:
-        # Using a standard desktop user agent often helps with block detection
         browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
         DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
         
         for m in masters:
-            # Fetch affiliated branches
             branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
             if not branches:
-                branches = [m] # Essential for single-location sites
+                branches = [m]
             
             name_raw = m.get('name') or "Unknown Place"
             name_low = name_raw.lower().replace("’", "'")
 
-            # 1. HYBRID RETAIL (Home Depot/Lowes)
-            is_hd = "home depot" in name_low
-            is_lowes = "lowe's" in name_low or "lowes" in name_low
-            if is_hd or is_lowes:
+            if "home depot" in name_low or "lowe's" in name_low or "lowes" in name_low:
                 print(f"🛡️ Hybrid: {m['name']}")
                 save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m, "global")
                 continue 
     
-            # 2. SPECIFIC BRANCH SCRAPING (Lego/Barnes/Slime)
             elif any(x in name_low for x in ["lego", "barnes", "slime"]):
                 print(f"🔍 Dynamic: {m['name']}")
                 if "barnes" in name_low:
                     for branch in branches:
-                        time.sleep(random.uniform(2.0, 4.0))
+                        time.sleep(random.uniform(3.0, 6.0)) # Increased buffer
                         scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
                 else:
-                    time.sleep(random.uniform(3.0, 5.0))
+                    time.sleep(random.uniform(4.0, 7.0)) # Increased buffer
                     scrape_and_save_1(context, m, branches, "mapping", midnight_today)
             
-            # 3. LIBRARIES
             elif "library" in name_low:
                 print(f"📚 Library Mapping: {m['name']}")
-                time.sleep(random.uniform(2.0, 4.0))
+                time.sleep(random.uniform(3.0, 6.0)) # Increased buffer
                 scrape_and_save_1(context, m, branches, "mapping", midnight_today)
 
-            # 4. UNIVERSAL / MUSEUM SITES
             else:
                 print(f"🌐 Universal/Museum Scrape (Type 2): {m['name']}")
                 scrape_and_save_2(context, m, branches, "global", midnight_today)
 
-            print(f"☕ Finished {m['name']}. Cooling down 15s for API stability...")
-            time.sleep(15)
+            # --- BUFFER FOR FREE TIER STABILITY ---
+            # Increased from 15s to 25s to prevent TPM (Tokens Per Minute) exhaustion 
+            # when running 70+ consecutive AI requests.
+            print(f"☕ Finished {m['name']}. Cooling down 25s for API stability...")
+            time.sleep(25)
             
         browser.close()
 
-    # Run AI discovery for events with missing descriptions
     run_gemini_discovery(midnight_today)
+
     
 if __name__ == "__main__":
     run_scraper()
