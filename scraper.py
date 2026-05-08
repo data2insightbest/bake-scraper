@@ -27,7 +27,7 @@ PROJECT_BANK = {
         "2026-10-03": "Kids Workshop: Witch Candy Box",
         "2026-11-07": "Kids Workshop: Dump Truck",
         "2026-12-05": "Kids Workshop: Holiday Train"
-    },
+    }
     "lowe's": {
         "2026-05-16": "Lowe's Kids Club: Garden Basket",
         "2026-06-13": "Lowe's Kids Club: Trophy Cup",
