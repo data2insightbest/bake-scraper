@@ -742,64 +742,64 @@ def run_gemini_discovery(midnight):
         save_events(events, [{"id": 9999, "name": "Bay Area Pop-up", "zip_code": "94103"}], midnight, discovery_master, "global")
 
 def run_scraper():
-    """
-    Main orchestration function for the scraping pipeline.
-    """
-    from __main__ import supabase, get_daily_batch, run_gemini_discovery, scrape_and_save_1, scrape_and_save_2, get_hybrid_retail_events
-    from playwright.sync_api import sync_playwright
+    """
+    Main orchestration function for the scraping pipeline.
+    """
+    from __main__ import supabase, get_daily_batch, run_gemini_discovery, scrape_and_save_1, scrape_and_save_2, get_hybrid_retail_events
+    from playwright.sync_api import sync_playwright
 
-    midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-   
-    # --- CHANGE HERE: Increase limit to none to cover all current and future places ---
-    masters = get_daily_batch(limit=None)
-    if not masters: return
+    midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
+    
+    # --- CHANGE HERE: Increase limit to none to cover all current and future places ---
+    masters = get_daily_batch(limit=None) 
+    if not masters: return
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-        DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
-       
-        for m in masters:
-            branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
-            if not branches:
-                branches = [m]
-           
-            name_raw = m.get('name') or "Unknown Place"
-            name_low = name_raw.lower().replace("’", "'")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+        DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
+        
+        for m in masters:
+            branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
+            if not branches:
+                branches = [m]
+            
+            name_raw = m.get('name') or "Unknown Place"
+            name_low = name_raw.lower().replace("’", "'")
 
-            if "home depot" in name_low or "lowe's" in name_low or "lowes" in name_low:
-                print(f"🛡️ Hybrid: {m['name']}")
-                save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m, "global")
-                continue
-   
-            elif any(x in name_low for x in ["lego", "barnes", "slime"]):
-                print(f"🔍 Dynamic: {m['name']}")
-                if "barnes" in name_low:
-                    for branch in branches:
-                        time.sleep(random.uniform(3.0, 6.0)) # Increased buffer
-                        scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
-                else:
-                    time.sleep(random.uniform(4.0, 7.0)) # Increased buffer
-                    scrape_and_save_1(context, m, branches, "mapping", midnight_today)
-           
-            elif "library" in name_low:
-                print(f"📚 Library Mapping: {m['name']}")
-                time.sleep(random.uniform(3.0, 6.0)) # Increased buffer
-                scrape_and_save_1(context, m, branches, "mapping", midnight_today)
+            if "home depot" in name_low or "lowe's" in name_low or "lowes" in name_low:
+                print(f"🛡️ Hybrid: {m['name']}")
+                save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m, "global")
+                continue 
+    
+            elif any(x in name_low for x in ["lego", "barnes", "slime"]):
+                print(f"🔍 Dynamic: {m['name']}")
+                if "barnes" in name_low:
+                    for branch in branches:
+                        time.sleep(random.uniform(3.0, 6.0)) # Increased buffer
+                        scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
+                else:
+                    time.sleep(random.uniform(4.0, 7.0)) # Increased buffer
+                    scrape_and_save_1(context, m, branches, "mapping", midnight_today)
+            
+            elif "library" in name_low:
+                print(f"📚 Library Mapping: {m['name']}")
+                time.sleep(random.uniform(3.0, 6.0)) # Increased buffer
+                scrape_and_save_1(context, m, branches, "mapping", midnight_today)
 
-            else:
-                print(f"🌐 Universal/Museum Scrape (Type 2): {m['name']}")
-                scrape_and_save_2(context, m, branches, "global", midnight_today)
+            else:
+                print(f"🌐 Universal/Museum Scrape (Type 2): {m['name']}")
+                scrape_and_save_2(context, m, branches, "global", midnight_today)
 
-            # --- BUFFER FOR FREE TIER STABILITY ---
-            # Increased from 15s to 25s to prevent TPM (Tokens Per Minute) exhaustion
-            # when running 70+ consecutive AI requests.
-            print(f"☕ Finished {m['name']}. Cooling down 25s for API stability...")
-            time.sleep(25)
-           
-        browser.close()
+            # --- BUFFER FOR FREE TIER STABILITY ---
+            # Increased from 15s to 25s to prevent TPM (Tokens Per Minute) exhaustion 
+            # when running 70+ consecutive AI requests.
+            print(f"☕ Finished {m['name']}. Cooling down 25s for API stability...")
+            time.sleep(25)
+            
+        browser.close()
 
-    run_gemini_discovery(midnight_today)
+    run_gemini_discovery(midnight_today)
         
 #def run_scraper():
 #    midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
