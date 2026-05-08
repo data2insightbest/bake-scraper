@@ -18,26 +18,26 @@ MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Appl
 
 # --- Hybrid Step 1: Updated March Project Bank ---
 PROJECT_BANK = {
-    "home depot": {
-        "2026-05-02": "Kids Workshop",
-        "2026-06-06": "Kids Workshop: Goalie Game",
-        "2026-07-04": "Kids Workshop: Go Kart",
-        "2026-08-01": "Kids Workshop: Rocket Game",
-        "2026-09-05": "Kids Workshop: School Bus Organizer",
-        "2026-10-03": "Kids Workshop: Witch Candy Box",
-        "2026-11-07": "Kids Workshop: Dump Truck",
-        "2026-12-05": "Kids Workshop: Holiday Train"
-    }
-    "lowe's": {
-        "2026-05-16": "Lowe's Kids Club: Garden Basket",
-        "2026-06-13": "Lowe's Kids Club: Trophy Cup",
-        "2026-07-18": "Lowe's Kids Club: Mini Toy Box",
-        "2026-08-15": "Lowe's Kids Club: Paw Patrol: The Dino Movie Workshop",
-        "2026-09-12": "Lowe's Kids Club: Haunted House",
-        "2026-10-17": "Lowe's Kids Club: Firefighting Plane",
-        "2026-11-14": "Lowe's Kids Club: Holiday Engine",
-        "2026-12-12": "Lowe's Kids Club: Holiday Trolley Car"
-    }
+    "home depot": {
+        "2026-05-02": "Kids Workshop",
+        "2026-06-06": "Kids Workshop: Goalie Game",
+        "2026-07-04": "Kids Workshop: Go Kart",
+        "2026-08-01": "Kids Workshop: Rocket Game",
+        "2026-09-05": "Kids Workshop: School Bus Organizer",
+        "2026-10-03": "Kids Workshop: Witch Candy Box",
+        "2026-11-07": "Kids Workshop: Dump Truck",
+        "2026-12-05": "Kids Workshop: Holiday Train"
+    },
+    "lowe's": {
+        "2026-05-16": "Lowe's Kids Club: Garden Basket",
+        "2026-06-13": "Lowe's Kids Club: Trophy Cup",
+        "2026-07-18": "Lowe's Kids Club: Mini Toy Box",
+        "2026-08-15": "Lowe's Kids Club: Paw Patrol: The Dino Movie Workshop",
+        "2026-09-12": "Lowe's Kids Club: Haunted House",
+        "2026-10-17": "Lowe's Kids Club: Firefighting Plane",
+        "2026-11-14": "Lowe's Kids Club: Holiday Engine",
+        "2026-12-12": "Lowe's Kids Club: Holiday Trolley Car"
+    }
 }
 
 # --- Utility Functions ---
