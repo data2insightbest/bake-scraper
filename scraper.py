@@ -748,8 +748,16 @@ def run_scraper():
     from __main__ import supabase, get_daily_batch, run_gemini_discovery, scrape_and_save_1, scrape_and_save_2, get_hybrid_retail_events
     from playwright.sync_api import sync_playwright
 
+    today_dt = datetime.now().date()
     midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    
+
+    # --- ADD THE CLEANUP CODE HERE ---
+    print(f"🧹 Purging events older than {today_dt.isoformat()}...")
+    try:
+        supabase.table("events").delete().lt("event_date", today_dt.isoformat()).execute()
+    except Exception as e:
+        print(f"⚠️ Cleanup error: {e}")
+
     # --- CHANGE HERE: Increase limit to none to cover all current and future places ---
     masters = get_daily_batch(limit=None) 
     if not masters: return
