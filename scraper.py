@@ -413,21 +413,21 @@ def generate_with_retry(prompt, text_content, context_name="General"):
     return []
 
 def get_daily_batch(limit=None):
-    """
-    Fetches places for scraping.
-    If limit is None, it fetches all master records.
-    """
-    query = supabase.table("places")\
-        .select("*")\
-        .eq("is_master", True)\
-        .order("last_scraped_at")\
-        .order("id")
+    """
+    Fetches places for scraping. 
+    If limit is None, it fetches all master records.
+    """
+    query = supabase.table("places")\
+        .select("*")\
+        .eq("is_master", True)\
+        .order("last_scraped_at")\
+        .order("id")
 
-    if limit:
-        query = query.limit(limit)
+    if limit:
+        query = query.limit(limit)
 
-    res = query.execute()
-    return res.data
+    res = query.execute()
+    return res.data
     
 #def get_daily_batch(limit=24):
 #    """Reverted logic to fix nulls_first crash while keeping ID sorting."""
