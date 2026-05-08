@@ -1,0 +1,25 @@
+name: Friday Morning BAKE Email
+on:
+  schedule:
+    # Runs at 15:00 UTC (8:00 AM PST) every Friday
+    - cron: '0 15 * * 5'
+  workflow_dispatch: # This allows the manual "Run workflow" button
+
+jobs:
+  send-emails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install
+      - name: Run Script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: npx tsx scripts/send-friday-email.ts
+        
