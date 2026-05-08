@@ -18,16 +18,26 @@ MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Appl
 
 # --- Hybrid Step 1: Updated March Project Bank ---
 PROJECT_BANK = {
-    "home depot": {
-        "2026-03-07": "Kids Workshop: Leprechaun Trap",
-        "2026-04-04": "Kids Workshop: Farm Planter",
-        "2026-05-02": "Kids Workshop: Mother's Day Frame"
-    },
-    "lowe's": {
-        "2026-03-21": "Lowe's Kids Club: Lawn Mower",
-        "2026-04-18": "Lowe's Kids Club: Terrarium",
-        "2026-05-16": "Lowe's Kids Club: Birdhouse"
-    }
+    "home depot": {
+        "2026-05-02": "Kids Workshop",
+        "2026-06-06": "Kids Workshop: Goalie Game",
+        "2026-07-04": "Kids Workshop: Go Kart",
+        "2026-08-01": "Kids Workshop: Rocket Game",
+        "2026-09-05": "Kids Workshop: School Bus Organizer",
+        "2026-10-03": "Kids Workshop: Witch Candy Box",
+        "2026-11-07": "Kids Workshop: Dump Truck",
+        "2026-12-05": "Kids Workshop: Holiday Train"
+    },
+    "lowe's": {
+        "2026-05-16": "Lowe's Kids Club: Garden Basket",
+        "2026-06-13": "Lowe's Kids Club: Trophy Cup",
+        "2026-07-18": "Lowe's Kids Club: Mini Toy Box",
+        "2026-08-15": "Lowe's Kids Club: Paw Patrol: The Dino Movie Workshop",
+        "2026-09-12": "Lowe's Kids Club: Haunted House",
+        "2026-10-17": "Lowe's Kids Club: Firefighting Plane",
+        "2026-11-14": "Lowe's Kids Club: Holiday Engine",
+        "2026-12-12": "Lowe's Kids Club: Holiday Trolley Car"
+    }
 }
 
 # --- Utility Functions ---
@@ -402,31 +412,38 @@ def generate_with_retry(prompt, text_content, context_name="General"):
 
     return []
 
-def get_daily_batch(limit=24):
-    """Reverted logic to fix nulls_first crash while keeping ID sorting."""
-    three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
-    # 1. Sort by last_scraped_at (NULLs naturally group together)
-    # 2. Sort by ID (Ensures ID 1, 2, 3 come first within the NULL group)
-    res = supabase.table("places")\
-        .select("*")\
-        .eq("is_master", True)\
-        .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}")\
-        .order("last_scraped_at")\
-        .order("id")\
-        .limit(limit)\
-        .execute()
-    return res.data
- 
+def get_daily_batch(limit=None):
+    """
+    Fetches places for scraping.
+    If limit is None, it fetches all master records.
+    """
+    query = supabase.table("places")\
+        .select("*")\
+        .eq("is_master", True)\
+        .order("last_scraped_at")\
+        .order("id")
+
+    if limit:
+        query = query.limit(limit)
+
+    res = query.execute()
+    return res.data
+    
 #def get_daily_batch(limit=24):
-#    """Modified to strictly test IDs 1 through 5 only."""
-    # We remove the three_days_ago filter to ensure we grab these 5 regardless of status
+#    """Reverted logic to fix nulls_first crash while keeping ID sorting."""
+#    three_days_ago = (datetime.now() - timedelta(days=3)).isoformat()
+#    # 1. Sort by last_scraped_at (NULLs naturally group together)
+#    # 2. Sort by ID (Ensures ID 1, 2, 3 come first within the NULL group)
 #    res = supabase.table("places")\
 #        .select("*")\
-#        .in_("id", [1])\
+#        .eq("is_master", True)\
+#        .or_(f"last_scraped_at.is.null,last_scraped_at.lt.{three_days_ago}")\
+#        .order("last_scraped_at")\
 #        .order("id")\
 #        .limit(limit)\
 #        .execute()
 #    return res.data
+
        
 # --- Scraper Pathway --- this function works for the category of workshop, but not others
 def scrape_and_save_1(context, master, target_branches, mode, midnight, zip_code=None):
@@ -723,104 +740,131 @@ def run_gemini_discovery(midnight):
         # Use ID 9999 to prevent collision with Academy of Sciences (ID 1)
         discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category": "Special Events"}
         save_events(events, [{"id": 9999, "name": "Bay Area Pop-up", "zip_code": "94103"}], midnight, discovery_master, "global")
-        
+
 def run_scraper():
-    midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    masters = get_daily_batch(limit=24)
-    if not masters: return
+    """
+    Main orchestration function for the scraping pipeline.
+    """
+    from __main__ import supabase, get_daily_batch, run_gemini_discovery, scrape_and_save_1, scrape_and_save_2, get_hybrid_retail_events
+    from playwright.sync_api import sync_playwright
 
-    with sync_playwright() as p:
-        # Using a standard desktop user agent often helps with ID 3 & 5 blocks
-        browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-        DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
-        for m in masters:
-            # Mark as scraped immediately
-            # supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
+    midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
+   
+    # --- CHANGE HERE: Increase limit to none to cover all current and future places ---
+    masters = get_daily_batch(limit=None)
+    if not masters: return
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+        DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
+       
+        for m in masters:
+            branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
+            if not branches:
+                branches = [m]
+           
+            name_raw = m.get('name') or "Unknown Place"
+            name_low = name_raw.lower().replace("’", "'")
+
+            if "home depot" in name_low or "lowe's" in name_low or "lowes" in name_low:
+                print(f"🛡️ Hybrid: {m['name']}")
+                save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m, "global")
+                continue
+   
+            elif any(x in name_low for x in ["lego", "barnes", "slime"]):
+                print(f"🔍 Dynamic: {m['name']}")
+                if "barnes" in name_low:
+                    for branch in branches:
+                        time.sleep(random.uniform(3.0, 6.0)) # Increased buffer
+                        scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
+                else:
+                    time.sleep(random.uniform(4.0, 7.0)) # Increased buffer
+                    scrape_and_save_1(context, m, branches, "mapping", midnight_today)
+           
+            elif "library" in name_low:
+                print(f"📚 Library Mapping: {m['name']}")
+                time.sleep(random.uniform(3.0, 6.0)) # Increased buffer
+                scrape_and_save_1(context, m, branches, "mapping", midnight_today)
+
+            else:
+                print(f"🌐 Universal/Museum Scrape (Type 2): {m['name']}")
+                scrape_and_save_2(context, m, branches, "global", midnight_today)
+
+            # --- BUFFER FOR FREE TIER STABILITY ---
+            # Increased from 15s to 25s to prevent TPM (Tokens Per Minute) exhaustion
+            # when running 70+ consecutive AI requests.
+            print(f"☕ Finished {m['name']}. Cooling down 25s for API stability...")
+            time.sleep(25)
+           
+        browser.close()
+
+    run_gemini_discovery(midnight_today)
+        
+#def run_scraper():
+#    midnight_today = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
+#    masters = get_daily_batch(limit=24)
+#    if not masters: return
+
+#    with sync_playwright() as p:
+#        # Using a standard desktop user agent often helps with ID 3 & 5 blocks
+#        browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+#        DESKTOP_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+#        context = browser.new_context(user_agent=DESKTOP_UA, viewport={'width': 1920, 'height': 1080})        
+#        for m in masters:
+#            # Mark as scraped immediately
+#            # supabase.table("places").update({"last_scraped_at": datetime.now().isoformat()}).eq("id", m['id']).execute()
             
-            # Fetch affiliated branches
-            branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
-            if not branches:
-                branches = [m] # This is vital for single-location sites like Academy!
+#            # Fetch affiliated branches
+#            branches = supabase.table("places").select("*").eq("parent_id", m['id']).execute().data
+#            if not branches:
+#                branches = [m] # This is vital for single-location sites like Academy!
             
-           # name_low = m['name'].lower().replace("’", "'")
-           # category_low = (m.get('category_name') or "").lower() # Ensure this matches your column name
+#           # name_low = m['name'].lower().replace("’", "'")
+#           # category_low = (m.get('category_name') or "").lower() # Ensure this matches your column name
            
-           # Use .get() and a fallback "" for BOTH name and category
-            name_raw = m.get('name') or "Unknown Place"
-            name_low = name_raw.lower().replace("’", "'")
-            category_raw = m.get('category_name') or ""
-            category_low = category_raw.lower()
+#           # Use .get() and a fallback "" for BOTH name and category
+#            name_raw = m.get('name') or "Unknown Place"
+#            name_low = name_raw.lower().replace("’", "'")
+#            category_raw = m.get('category_name') or ""
+#            category_low = category_raw.lower()
 
-            # 1. HYBRID RETAIL (Home Depot/Lowes)
-            is_hd = "home depot" in name_low
-            is_lowes = "lowe's" in name_low or "lowes" in name_low
-            if is_hd or is_lowes:
-                print(f"🛡️ Hybrid: {m['name']}")
-                # Pass the raw name to your existing working function
-                save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m, "global")
-                continue # Skip standard scraping
+#            # 1. HYBRID RETAIL (Home Depot/Lowes)
+#            is_hd = "home depot" in name_low
+#            is_lowes = "lowe's" in name_low or "lowes" in name_low
+#            if is_hd or is_lowes:
+#                print(f"🛡️ Hybrid: {m['name']}")
+#                # Pass the raw name to your existing working function
+#                save_events(get_hybrid_retail_events(m['name']), branches, midnight_today, m, "global")
+#                continue # Skip standard scraping
     
-            # 2. SPECIFIC BRANCH SCRAPING (Lego/Barnes/Slime)
-            elif any(x in name_low for x in ["lego", "barnes", "slime"]):
-                print(f"🔍 Dynamic: {m['name']}")
-                if "barnes" in name_low:
-                    # B&N requires individual zip code searches
-                    for branch in branches:
-                        time.sleep(random.uniform(2.0, 4.0))
-                        scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
-                else:
-                    # Slime and Lego: Scrape once, map to all branches in one go
-                    time.sleep(random.uniform(3.0, 5.0))
-                    scrape_and_save_1(context, m, branches, "mapping", midnight_today)
+#            # 2. SPECIFIC BRANCH SCRAPING (Lego/Barnes/Slime)
+#            elif any(x in name_low for x in ["lego", "barnes", "slime"]):
+#                print(f"🔍 Dynamic: {m['name']}")
+#                if "barnes" in name_low:
+#                    # B&N requires individual zip code searches
+#                    for branch in branches:
+#                        time.sleep(random.uniform(2.0, 4.0))
+#                        scrape_and_save_1(context, m, [branch], "specific", midnight_today, branch.get('zip_code'))
+#                else:
+#                    # Slime and Lego: Scrape once, map to all branches in one go
+#                    time.sleep(random.uniform(3.0, 5.0))
+#                    scrape_and_save_1(context, m, branches, "mapping", midnight_today)
             
-            # 3. LIBRARIES
-            elif "library" in name_low:
-                print(f"📚 Library Mapping: {m['name']}")
-                time.sleep(random.uniform(2.0, 4.0))
-                scrape_and_save_1(context, m, branches, "mapping", midnight_today)
+#            # 3. LIBRARIES
+#            elif "library" in name_low:
+#                print(f"📚 Library Mapping: {m['name']}")
+#                time.sleep(random.uniform(2.0, 4.0))
+#                scrape_and_save_1(context, m, branches, "mapping", midnight_today)
 
-            # 4. UNIVERSAL / MUSEUM SITES (the non-workshop category)
-            else:
-                print(f"🌐 Universal/Museum Scrape (Type 2): {m['name']}")
-                scrape_and_save_2(context, m, branches, "global", midnight_today)
+#            # 4. UNIVERSAL / MUSEUM SITES (the non-workshop category)
+#            else:
+#                print(f"🌐 Universal/Museum Scrape (Type 2): {m['name']}")
+#                scrape_and_save_2(context, m, branches, "global", midnight_today)
             
-        browser.close()
-    # Run the AI discovery for events with missing descriptions
-    run_gemini_discovery(midnight_today)
+#        browser.close()
+#    # Run the AI discovery for events with missing descriptions
+#    run_gemini_discovery(midnight_today)
     
 if __name__ == "__main__":
     run_scraper()
-#if __name__ == "__main__":
-#    midnight = datetime.combine(datetime.now().date(), dt_time.min).isoformat()
-    
-#    print("🚀 STARTING TARGETED TEST FOR IDs 1-5...")
-    
-    # Force reset so they aren't skipped by the 'last_scraped_at' filter
-#    try:
-#        supabase.table("places").update({"last_scraped_at": None}).gte("id", 9).lte("id", 185).execute()
-#    except Exception as e:
-#        print(f"⚠️ Note: Could not reset timestamps: {e}")
-
-    # Fetch IDs 1-5 directly
-#    res = supabase.table("places").select("*").gte("id", 9).lte("id", 185).execute()
-#    batch = res.data
-
-#    if batch:
-#        with sync_playwright() as p:
-            # Launch with 'Stealth' mode enabled
-#            browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-            
-            # Use a Desktop context to ensure the 'Exhibits' layout is full-width
-#            context = browser.new_context(
-#                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-#            )
-            
-#            for master in batch:
-                # We pass [master] as the 'target_branches' because in your current 
-                # setup, the master IS the place we want to save to.
-#                scrape_and_save(context, master, [master], "mapping", midnight)
-            
-#            browser.close()
-#    else:
-#        print("❌ Could not find IDs 1-5 in the places table.")
