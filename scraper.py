@@ -738,7 +738,7 @@ def run_gemini_discovery(midnight):
     events = generate_with_retry(prompt, "Bay Area", "Discovery")
     if events:
         # Use ID 9999 to prevent collision with Academy of Sciences (ID 1)
-        discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category": "Special Events"}
+        discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category_name": "Special Events"}
         save_events(events, [{"id": 9999, "name": "Bay Area Pop-up", "zip_code": "94103"}], midnight, discovery_master, "global")
 
 def run_scraper():
