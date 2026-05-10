@@ -23,7 +23,7 @@ def create_event_block(event, place_url):
     cat_color = "#ea580c" 
     
     # Ensure we have a valid link
-    event_link = place_url if place_url and place_url.startswith('https') else "#"
+    event_link = place_url if place_url and str(place_url).startswith('http') else "#"
 
     return f"""
     <div style="border: 1px solid #fed7aa; border-radius: 16px; padding: 20px; margin-bottom: 20px; font-family: sans-serif; background-color: #ffffff;">
@@ -60,9 +60,19 @@ def create_event_block(event, place_url):
 def send_weekly_digest():
     weekend_dates = get_upcoming_weekend()
     
-    # 1. Fetch all places into a lookup dictionary { "Place Name": "URL" }
-    places_resp = supabase.table("places").select("place_name, url").execute()
-    url_map = {p['place_name']: p['url'] for p in places_resp.data if p.get('place_name') and p.get('url')}
+    # 1. Fetch places - UPDATED to use "name" instead of "place_name"
+    # Added a try/except so if 'name' is also wrong, the script keeps running
+    url_map = {}
+    try:
+        places_resp = supabase.table("places").select("*").execute()
+        for p in places_resp.data:
+            # Try 'name', then 'place_name', then 'title'
+            p_name = p.get('name') or p.get('place_name') or p.get('title')
+            p_url = p.get('url')
+            if p_name and p_url:
+                url_map[p_name] = p_url
+    except Exception as e:
+        print(f"⚠️ Warning: Could not build URL map: {e}")
 
     # 2. Get users
     users_resp = supabase.table("preferences").select("*").eq("receive_emails", True).execute()
@@ -76,7 +86,7 @@ def send_weekly_digest():
         if not u_email or not u_categories or not u_zip:
             continue
 
-        # 3. Fetch events (removed the complex join that caused the error)
+        # 3. Fetch events
         events_resp = supabase.table("events").select("*")\
             .in_("event_date", weekend_dates)\
             .in_("category_name", u_categories)\
@@ -92,6 +102,7 @@ def send_weekly_digest():
             if (distance * 0.621371) <= u_radius:
                 title = ev['title']
                 date = ev['event_date']
+                # The event table uses place_name to refer to the location
                 loc = ev.get('place_name') or 'Local'
 
                 if title not in merged_events:
@@ -107,10 +118,9 @@ def send_weekly_digest():
             ev['display_dates'] = " & ".join(sorted(list(ev['dates_set'])))
             ev['display_locations'] = " | ".join(sorted(list(ev['locs_set'])))
             
-            # Lookup the URL using the place_name
-            # If multiple locations exist, we use the URL of the first one found
-            first_place = list(ev['locs_set'])[0]
-            ev['final_url'] = url_map.get(first_place, "#")
+            # Match the first location in the set to our URL map
+            first_loc = list(ev['locs_set'])[0]
+            ev['final_url'] = url_map.get(first_loc, "#")
             
             final_list.append(ev)
 
@@ -137,7 +147,7 @@ def send_weekly_digest():
                 })
                 print(f"✅ Success: Sent to {u_email}")
             except Exception as e:
-                print(f"❌ Error: {e}")
+                print(f"❌ Error sending: {e}")
 
 if __name__ == "__main__":
     send_weekly_digest()
