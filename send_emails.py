@@ -17,15 +17,13 @@ def get_upcoming_weekend():
     sunday = saturday + timedelta(days=1)
     return [saturday.date().isoformat(), sunday.date().isoformat()]
 
-def create_event_block(event):
-    """Generates HTML card with the joined URL from the places table."""
+def create_event_block(event, place_url):
+    """Generates HTML card with the manually matched URL."""
     score = event.get('specificity_score', 0)
     cat_color = "#ea580c" 
     
-    # Grab the URL that was joined from the places table
-    # This comes from the 'places' key in the response dictionary
-    place_data = event.get('places', {})
-    event_link = place_data.get('url', '#') if isinstance(place_data, dict) else '#'
+    # Ensure we have a valid link
+    event_link = place_url if place_url and place_url.startswith('https') else "#"
 
     return f"""
     <div style="border: 1px solid #fed7aa; border-radius: 16px; padding: 20px; margin-bottom: 20px; font-family: sans-serif; background-color: #ffffff;">
@@ -61,6 +59,12 @@ def create_event_block(event):
 
 def send_weekly_digest():
     weekend_dates = get_upcoming_weekend()
+    
+    # 1. Fetch all places into a lookup dictionary { "Place Name": "URL" }
+    places_resp = supabase.table("places").select("place_name, url").execute()
+    url_map = {p['place_name']: p['url'] for p in places_resp.data if p.get('place_name') and p.get('url')}
+
+    # 2. Get users
     users_resp = supabase.table("preferences").select("*").eq("receive_emails", True).execute()
     
     for user in users_resp.data:
@@ -72,9 +76,8 @@ def send_weekly_digest():
         if not u_email or not u_categories or not u_zip:
             continue
 
-        # KEY CHANGE: Join the 'places' table to get the 'url'
-        # Assumes the events table has a foreign key to places (e.g., place_name)
-        events_resp = supabase.table("events").select("*, places(url)")\
+        # 3. Fetch events (removed the complex join that caused the error)
+        events_resp = supabase.table("events").select("*")\
             .in_("event_date", weekend_dates)\
             .in_("category_name", u_categories)\
             .order("specificity_score", desc=True)\
@@ -103,17 +106,23 @@ def send_weekly_digest():
         for title, ev in merged_events.items():
             ev['display_dates'] = " & ".join(sorted(list(ev['dates_set'])))
             ev['display_locations'] = " | ".join(sorted(list(ev['locs_set'])))
+            
+            # Lookup the URL using the place_name
+            # If multiple locations exist, we use the URL of the first one found
+            first_place = list(ev['locs_set'])[0]
+            ev['final_url'] = url_map.get(first_place, "#")
+            
             final_list.append(ev)
 
         if final_list:
             final_list.sort(key=lambda x: x.get('specificity_score', 0), reverse=True)
-            event_html = "".join([create_event_block(e) for e in final_list])
+            event_html = "".join([create_event_block(e, e['final_url']) for e in final_list])
             
             email_body = f"""
             <div style="background-color: #fff7ed; padding: 40px 10px; font-family: sans-serif;">
                 <div style="max-width: 600px; margin: 0 auto;">
                     <h1 style="color: #ea580c; text-align: center; font-size: 22px;">Your Weekend Kids Activity Digest</h1>
-                    <p style="text-align: center; color: #7c2d12; margin-bottom: 30px;">Top picks near {u_zip}</p>
+                    <p style="text-align: center; color: #7c2d12; margin-bottom: 30px;">Top picks near {u_zip} for {weekend_dates[0]} & {weekend_dates[1]}</p>
                     {event_html}
                 </div>
             </div>
