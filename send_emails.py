@@ -19,13 +19,16 @@ def get_upcoming_weekend():
     return [saturday.date().isoformat(), sunday.date().isoformat()]
 
 def create_event_block(event):
-    """Generates HTML with the Link at the far right of the third row."""
+    """Generates HTML with clickable link on the far right of row 3."""
     score = event.get('specificity_score', 0)
     cat_color = "#ea580c" 
     
-    # URL Logic: Ensure it's clickable
-    raw_url = event.get('url', '')
-    event_link = raw_url if raw_url.startswith('http') else f"https://{raw_url}"
+    # URL Logic: Force clickable link
+    raw_url = str(event.get('url', '')).strip()
+    if raw_url and not raw_url.startswith(('http://', 'https://')):
+        event_link = f"https://{raw_url}"
+    else:
+        event_link = raw_url
 
     return f"""
     <div style="border: 1px solid #fed7aa; border-radius: 16px; padding: 20px; margin-bottom: 20px; font-family: sans-serif; background-color: #ffffff;">
@@ -37,16 +40,16 @@ def create_event_block(event):
         </div>
 
         <div style="color: #64748b; font-size: 14px; margin-bottom: 12px; line-height: 1.5;">
-            {event.get('snippet', 'Explore this local activity!')}
+            {event.get('snippet', 'Check out this local family event!')}
         </div>
 
         <div style="display: flex; justify-content: space-between; align-items: flex-end; font-size: 12px; color: #475569; border-top: 1px solid #f1f5f9; padding-top: 12px;">
             <div style="flex: 1;">
                 <div style="margin-bottom: 4px;">
-                    📍 {event.get('venue_name')}
+                    📍 <strong>Location:</strong> {event.get('venue_name', 'See details')}
                 </div>
                 <div style="margin-bottom: 6px;">
-                    📅 {event.get('event_date')}
+                    📅 <strong>Date:</strong> {event.get('event_date')}
                 </div>
                 <span style="background-color: {cat_color}; color: white; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; text-transform: uppercase;">
                     {event.get('category_name', 'General')}
@@ -54,8 +57,8 @@ def create_event_block(event):
             </div>
             
             <div style="text-align: right; margin-left: 10px;">
-                <a href="{event_link}" target="_blank" style="color: #ea580c; text-decoration: underline; font-weight: bold; font-size: 13px;">
-                    Link →
+                <a href="{event_link}" target="_blank" style="color: #ea580c; text-decoration: underline; font-weight: bold; font-size: 13px; display: inline-block;">
+                    Visit Website →
                 </a>
             </div>
         </div>
@@ -81,21 +84,23 @@ def send_weekly_digest():
             .order("specificity_score", desc=True)\
             .execute()
 
-        # Merging logic
+        # Improved Merging Logic
         merged_events = {}
         for ev in events_resp.data:
             ev_zip = str(ev.get('zip_code', ''))
             distance = dist_calc.query_postal_code(u_zip, ev_zip)
             
+            # Default to 0 if zip lookup fails
             if math.isnan(distance): distance = 0
             
             if (distance * 0.621371) <= u_radius:
                 title = ev['title']
                 date = ev['event_date']
-                loc = ev.get('venue_name', 'Local')
+                # Grab venue_name, falling back to 'Local' only if truly empty
+                loc = ev.get('venue_name') or ev.get('location') or 'Local'
 
                 if title not in merged_events:
-                    merged_events[title] = ev
+                    merged_events[title] = ev.copy()
                     merged_events[title]['dates_set'] = {date}
                     merged_events[title]['locs_set'] = {loc}
                 else:
@@ -104,6 +109,7 @@ def send_weekly_digest():
 
         final_list = []
         for title, ev in merged_events.items():
+            # Join multiple dates with '&' and locations with '|'
             ev['event_date'] = " & ".join(sorted(list(ev['dates_set'])))
             ev['venue_name'] = " | ".join(sorted(list(ev['locs_set'])))
             final_list.append(ev)
@@ -134,7 +140,7 @@ def send_weekly_digest():
                 })
                 print(f"✅ Success: Digest sent to {u_email}")
             except Exception as e:
-                print(f"❌ Error: {e}")
+                print(f"❌ Error sending to {u_email}: {e}")
 
 if __name__ == "__main__":
     send_weekly_digest()
