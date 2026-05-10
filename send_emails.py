@@ -11,7 +11,6 @@ resend.api_key = os.environ['RESEND_API_KEY']
 dist_calc = pgeocode.GeoDistance('us')
 
 def get_upcoming_weekend():
-    """Calculates the dates for the upcoming Saturday and Sunday."""
     today = datetime.now()
     days_to_sat = (5 - today.weekday()) % 7
     saturday = today + timedelta(days=days_to_sat)
@@ -19,16 +18,14 @@ def get_upcoming_weekend():
     return [saturday.date().isoformat(), sunday.date().isoformat()]
 
 def create_event_block(event):
-    """Generates HTML card using the place_name column."""
+    """Generates HTML card with the joined URL from the places table."""
     score = event.get('specificity_score', 0)
     cat_color = "#ea580c" 
     
-    # URL Logic: Ensure the link is functional
-    raw_url = str(event.get('url') or event.get('link') or "").strip()
-    if raw_url and not raw_url.startswith(('http://', 'https://')):
-        event_link = f"https://{raw_url}"
-    else:
-        event_link = raw_url if raw_url else "#"
+    # Grab the URL that was joined from the places table
+    # This comes from the 'places' key in the response dictionary
+    place_data = event.get('places', {})
+    event_link = place_data.get('url', '#') if isinstance(place_data, dict) else '#'
 
     return f"""
     <div style="border: 1px solid #fed7aa; border-radius: 16px; padding: 20px; margin-bottom: 20px; font-family: sans-serif; background-color: #ffffff;">
@@ -43,25 +40,22 @@ def create_event_block(event):
             {event.get('snippet', 'Check out this local family event!')}
         </div>
 
-        <div style="display: flex; justify-content: space-between; align-items: flex-end; font-size: 12px; color: #475569; border-top: 1px solid #f1f5f9; padding-top: 12px;">
-            <div style="flex: 1;">
-                <div style="margin-bottom: 4px;">
-                    📍 <strong>Location:</strong> {event.get('display_locations', 'Multiple Locations')}
-                </div>
-                <div style="margin-bottom: 6px;">
-                    📅 <strong>Date:</strong> {event.get('display_dates')}
-                </div>
-                <span style="background-color: {cat_color}; color: white; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; text-transform: uppercase;">
-                    {event.get('category_name', 'General')}
-                </span>
-            </div>
-            
-            <div style="text-align: right; margin-left: 10px;">
-                <a href="{event_link}" target="_blank" style="color: #ea580c; text-decoration: underline; font-weight: bold; font-size: 13px; display: inline-block;">
-                    Visit Website →
-                </a>
-            </div>
-        </div>
+        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-top: 1px solid #f1f5f9; padding-top: 12px;">
+            <tr>
+                <td style="font-size: 12px; color: #475569; vertical-align: bottom;">
+                    <div style="margin-bottom: 4px;">📍 <strong>Location:</strong> {event.get('display_locations', 'Local')}</div>
+                    <div style="margin-bottom: 6px;">📅 <strong>Date:</strong> {event.get('display_dates')}</div>
+                    <span style="background-color: {cat_color}; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; text-transform: uppercase;">
+                        {event.get('category_name', 'General')}
+                    </span>
+                </td>
+                <td style="text-align: right; vertical-align: bottom;">
+                    <a href="{event_link}" target="_blank" style="color: #ea580c; text-decoration: underline; font-weight: bold; font-size: 14px; display: inline-block;">
+                        Visit Website →
+                    </a>
+                </td>
+            </tr>
+        </table>
     </div>
     """
 
@@ -78,7 +72,9 @@ def send_weekly_digest():
         if not u_email or not u_categories or not u_zip:
             continue
 
-        events_resp = supabase.table("events").select("*")\
+        # KEY CHANGE: Join the 'places' table to get the 'url'
+        # Assumes the events table has a foreign key to places (e.g., place_name)
+        events_resp = supabase.table("events").select("*, places(url)")\
             .in_("event_date", weekend_dates)\
             .in_("category_name", u_categories)\
             .order("specificity_score", desc=True)\
@@ -88,14 +84,11 @@ def send_weekly_digest():
         for ev in events_resp.data:
             ev_zip = str(ev.get('zip_code', ''))
             distance = dist_calc.query_postal_code(u_zip, ev_zip)
-            
             if math.isnan(distance): distance = 0
             
             if (distance * 0.621371) <= u_radius:
                 title = ev['title']
                 date = ev['event_date']
-                
-                # FIXED: Pulling from place_name column
                 loc = ev.get('place_name') or 'Local'
 
                 if title not in merged_events:
@@ -120,7 +113,7 @@ def send_weekly_digest():
             <div style="background-color: #fff7ed; padding: 40px 10px; font-family: sans-serif;">
                 <div style="max-width: 600px; margin: 0 auto;">
                     <h1 style="color: #ea580c; text-align: center; font-size: 22px;">Your Weekend Kids Activity Digest</h1>
-                    <p style="text-align: center; color: #7c2d12; margin-bottom: 30px;">Top picks near {u_zip} for {weekend_dates[0]} & {weekend_dates[1]}</p>
+                    <p style="text-align: center; color: #7c2d12; margin-bottom: 30px;">Top picks near {u_zip}</p>
                     {event_html}
                 </div>
             </div>
@@ -133,7 +126,7 @@ def send_weekly_digest():
                     "subject": "Your Weekend Kids Activity Digest",
                     "html": email_body
                 })
-                print(f"✅ Success: Digest sent to {u_email}")
+                print(f"✅ Success: Sent to {u_email}")
             except Exception as e:
                 print(f"❌ Error: {e}")
 
