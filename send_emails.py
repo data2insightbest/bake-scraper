@@ -19,19 +19,24 @@ def get_upcoming_weekend():
     return [saturday.date().isoformat(), sunday.date().isoformat()]
 
 def create_event_block(event):
-    """Generates HTML with clickable link on the far right of row 3."""
+    """Generates HTML card with full venue names and functional link."""
     score = event.get('specificity_score', 0)
     cat_color = "#ea580c" 
     
-    # URL Logic: Force clickable link
-    raw_url = str(event.get('url', '')).strip()
+    # URL Logic: Ensure the link is functional
+    # We check common column names just in case
+    raw_url = event.get('url') or event.get('link') or event.get('event_url') or ""
+    raw_url = str(raw_url).strip()
+    
     if raw_url and not raw_url.startswith(('http://', 'https://')):
         event_link = f"https://{raw_url}"
-    else:
+    elif raw_url:
         event_link = raw_url
+    else:
+        event_link = "#"
 
     return f"""
-    <div style="border: 1px solid #fed7aa; border-radius: 16px; padding: 20px; margin-bottom: 20px; font-family: sans-serif; background-color: #ffffff;">
+    <div style="border: 1px solid #fed7aa; border-radius: 16px; padding: 20px; margin-bottom: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #ffffff;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
             <span style="font-size: 18px; font-weight: bold; color: #1e293b;">{event['title']}</span>
             <span style="background-color: #ffedd5; color: #ea580c; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold;">
@@ -46,10 +51,10 @@ def create_event_block(event):
         <div style="display: flex; justify-content: space-between; align-items: flex-end; font-size: 12px; color: #475569; border-top: 1px solid #f1f5f9; padding-top: 12px;">
             <div style="flex: 1;">
                 <div style="margin-bottom: 4px;">
-                    📍 <strong>Location:</strong> {event.get('venue_name', 'See details')}
+                    📍 <strong>Location:</strong> {event.get('display_locations', 'Multiple Locations')}
                 </div>
                 <div style="margin-bottom: 6px;">
-                    📅 <strong>Date:</strong> {event.get('event_date')}
+                    📅 <strong>Date:</strong> {event.get('display_dates')}
                 </div>
                 <span style="background-color: {cat_color}; color: white; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; text-transform: uppercase;">
                     {event.get('category_name', 'General')}
@@ -84,19 +89,18 @@ def send_weekly_digest():
             .order("specificity_score", desc=True)\
             .execute()
 
-        # Improved Merging Logic
+        # Merging logic to handle multiple locations/dates
         merged_events = {}
         for ev in events_resp.data:
             ev_zip = str(ev.get('zip_code', ''))
             distance = dist_calc.query_postal_code(u_zip, ev_zip)
             
-            # Default to 0 if zip lookup fails
             if math.isnan(distance): distance = 0
             
             if (distance * 0.621371) <= u_radius:
                 title = ev['title']
                 date = ev['event_date']
-                # Grab venue_name, falling back to 'Local' only if truly empty
+                # Pull full venue name (e.g., Home Depot - San Mateo)
                 loc = ev.get('venue_name') or ev.get('location') or 'Local'
 
                 if title not in merged_events:
@@ -109,9 +113,10 @@ def send_weekly_digest():
 
         final_list = []
         for title, ev in merged_events.items():
-            # Join multiple dates with '&' and locations with '|'
-            ev['event_date'] = " & ".join(sorted(list(ev['dates_set'])))
-            ev['venue_name'] = " | ".join(sorted(list(ev['locs_set'])))
+            # Format the strings for display
+            ev['display_dates'] = " & ".join(sorted(list(ev['dates_set'])))
+            # This ensures "Home Depot - Newark | Home Depot - San Mateo" style
+            ev['display_locations'] = " | ".join(sorted(list(ev['locs_set'])))
             final_list.append(ev)
 
         if final_list:
@@ -124,9 +129,6 @@ def send_weekly_digest():
                     <h1 style="color: #ea580c; text-align: center; font-size: 22px;">Your Weekend Kids Activity Digest</h1>
                     <p style="text-align: center; color: #7c2d12; margin-bottom: 30px;">Top picks near {u_zip} for {weekend_dates[0]} & {weekend_dates[1]}</p>
                     {event_html}
-                    <p style="text-align: center; font-size: 11px; color: #94a3b8; margin-top: 40px;">
-                        Manage your preferences in the BAKE app.
-                    </p>
                 </div>
             </div>
             """
@@ -140,7 +142,7 @@ def send_weekly_digest():
                 })
                 print(f"✅ Success: Digest sent to {u_email}")
             except Exception as e:
-                print(f"❌ Error sending to {u_email}: {e}")
+                print(f"❌ Error for {u_email}: {e}")
 
 if __name__ == "__main__":
     send_weekly_digest()
