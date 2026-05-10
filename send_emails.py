@@ -19,24 +19,19 @@ def get_upcoming_weekend():
     return [saturday.date().isoformat(), sunday.date().isoformat()]
 
 def create_event_block(event):
-    """Generates HTML card with full venue names and functional link."""
+    """Generates HTML card using the place_name column."""
     score = event.get('specificity_score', 0)
     cat_color = "#ea580c" 
     
     # URL Logic: Ensure the link is functional
-    # We check common column names just in case
-    raw_url = event.get('url') or event.get('link') or event.get('event_url') or ""
-    raw_url = str(raw_url).strip()
-    
+    raw_url = str(event.get('url') or event.get('link') or "").strip()
     if raw_url and not raw_url.startswith(('http://', 'https://')):
         event_link = f"https://{raw_url}"
-    elif raw_url:
-        event_link = raw_url
     else:
-        event_link = "#"
+        event_link = raw_url if raw_url else "#"
 
     return f"""
-    <div style="border: 1px solid #fed7aa; border-radius: 16px; padding: 20px; margin-bottom: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #ffffff;">
+    <div style="border: 1px solid #fed7aa; border-radius: 16px; padding: 20px; margin-bottom: 20px; font-family: sans-serif; background-color: #ffffff;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
             <span style="font-size: 18px; font-weight: bold; color: #1e293b;">{event['title']}</span>
             <span style="background-color: #ffedd5; color: #ea580c; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold;">
@@ -89,7 +84,6 @@ def send_weekly_digest():
             .order("specificity_score", desc=True)\
             .execute()
 
-        # Merging logic to handle multiple locations/dates
         merged_events = {}
         for ev in events_resp.data:
             ev_zip = str(ev.get('zip_code', ''))
@@ -100,8 +94,9 @@ def send_weekly_digest():
             if (distance * 0.621371) <= u_radius:
                 title = ev['title']
                 date = ev['event_date']
-                # Pull full venue name (e.g., Home Depot - San Mateo)
-                loc = ev.get('venue_name') or ev.get('location') or 'Local'
+                
+                # FIXED: Pulling from place_name column
+                loc = ev.get('place_name') or 'Local'
 
                 if title not in merged_events:
                     merged_events[title] = ev.copy()
@@ -113,9 +108,7 @@ def send_weekly_digest():
 
         final_list = []
         for title, ev in merged_events.items():
-            # Format the strings for display
             ev['display_dates'] = " & ".join(sorted(list(ev['dates_set'])))
-            # This ensures "Home Depot - Newark | Home Depot - San Mateo" style
             ev['display_locations'] = " | ".join(sorted(list(ev['locs_set'])))
             final_list.append(ev)
 
@@ -142,7 +135,7 @@ def send_weekly_digest():
                 })
                 print(f"✅ Success: Digest sent to {u_email}")
             except Exception as e:
-                print(f"❌ Error for {u_email}: {e}")
+                print(f"❌ Error: {e}")
 
 if __name__ == "__main__":
     send_weekly_digest()
