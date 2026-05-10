@@ -20,7 +20,7 @@ def send_weekly_digest():
         # (This is a simplified query logic)
         events = supabase.table("events").select("*")\
             .eq("zip_code", user_zip)\
-            .in_("category", categories)\
+            .in_("category_name", categories)\
             .gte("event_date", "today").execute()
 
         if events.data:
