@@ -50,63 +50,61 @@ def create_event_block(event):
 
 def send_weekly_digest():
     weekend_dates = get_upcoming_weekend()
-    
-    # 2. Get users who opted in
     users = supabase.table("preferences").select("*").eq("receive_emails", True).execute()
     
     for user in users.data:
-        u_email = user.get('email')
-        u_zip = str(user.get('zip_code'))
-        u_radius = user.get('search_radius', 25)
-        u_categories = user.get('selected_categories', [])
+        # ... (keep your existing setup code for u_email, u_zip, etc.) ...
 
-        # 3. Fetch events for the weekend and selected categories
+        # 1. Fetch events from Supabase
         events_resp = supabase.table("events").select("*")\
             .in_("event_date", weekend_dates)\
             .in_("category_name", u_categories)\
-            .order("specificity_score", desc=True)\
+            .order("specificity score", desc=True)\
             .execute()
 
-        filtered_events = []
+        # 2. Filter by distance first
+        valid_events = []
         for ev in events_resp.data:
-            ev_zip = str(ev.get('zip_code'))
-            
-            # 4. Radius Calculation
-            distance = dist_calc.query_postal_code(u_zip, ev_zip)
-            # Convert km to miles (pgeocode returns km)
-            distance_miles = distance * 0.621371
-            
-            if distance_miles <= u_radius:
-                filtered_events.append(ev)
+            dist = dist_calc.query_postal_code(u_zip, str(ev.get('zip_code')))
+            if (dist * 0.621371) <= u_radius:
+                valid_events.append(ev)
 
-        # 5. Send Email if events found
-        if filtered_events:
-            event_html = "".join([create_event_block(e) for e in filtered_events])
-            
-            email_body = f"""
-            <div style="background-color: #fff7ed; padding: 40px 20px; font-family: sans-serif;">
-                <div style="max-width: 600px; margin: 0 auto;">
-                    <h1 style="color: #ea580c; text-align: center;">Your BAKE Weekend Roundup</h1>
-                    <p style="text-align: center; color: #7c2d12;">Top picks within {u_radius} miles of {u_zip}</p>
-                    <hr style="border: none; border-top: 1px solid #fed7aa; margin: 20px 0;">
-                    {event_html}
-                    <p style="text-align: center; font-size: 12px; color: #94a3b8; margin-top: 30px;">
-                        Manage your preferences in the BAKE app.
-                    </p>
-                </div>
-            </div>
-            """
+        # 3. MERGE LOGIC
+        # We use a dictionary where the key is the event title
+        merged_data = {}
 
-            try:
-                resend.Emails.send({
-                    "from": "BAKE <onboarding@resend.dev>",
-                    "to": u_email,
-                    "subject": f"Kids Activities for {weekend_dates[0]}",
-                    "html": email_body
-                })
-                print(f"✅ Sent to {u_email} ({len(filtered_events)} events)")
-            except Exception as e:
-                print(f"❌ Failed to send to {u_email}: {e}")
+        for ev in valid_events:
+            title = ev['title']
+            date = ev['event_date']
+            loc = ev.get('venue_name', 'Local')
+
+            if title not in merged_data:
+                # First time seeing this event title
+                merged_data[title] = ev
+                # Turn date and location into sets to handle merging
+                merged_data[title]['dates_set'] = {date}
+                merged_data[title]['locations_set'] = {loc}
+            else:
+                # We've seen this event, add the new date and location
+                merged_data[title]['dates_set'].add(date)
+                merged_data[title]['locations_set'].add(loc)
+
+        # 4. Prepare for Display
+        final_display_list = []
+        for title, ev in merged_data.items():
+            # Convert sets back to sorted strings for the email
+            ev['event_date'] = ", ".join(sorted(list(ev['dates_set'])))
+            ev['venue_name'] = ", ".join(sorted(list(ev['locations_set'])))
+            final_display_list.append(ev)
+
+        # 5. Build and Send Email
+        if final_display_list:
+            # Sort again by score after merging (in case order shifted)
+            final_display_list.sort(key=lambda x: x.get('specificity score', 0), reverse=True)
+            
+            event_html = "".join([create_event_block(e) for e in final_display_list])
+            # ... (the rest of your email sending code) ...
+            
 
 if __name__ == "__main__":
     send_weekly_digest()
