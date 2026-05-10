@@ -20,7 +20,7 @@ def get_upcoming_weekend():
 
 def create_event_block(event):
     """Generates HTML that mimics the Replit 'Card' UI."""
-    score = event.get('specialty_score', 0)
+    score = event.get('specificity_score', 0)
     # Mapping colors if you have them, otherwise default orange
     cat_color = "#ea580c" 
     
@@ -64,7 +64,7 @@ def send_weekly_digest():
         events_resp = supabase.table("events").select("*")\
             .in_("event_date", weekend_dates)\
             .in_("category_name", u_categories)\
-            .order("specialty_score", desc=True)\
+            .order("specificity_score", desc=True)\
             .execute()
 
         filtered_events = []
