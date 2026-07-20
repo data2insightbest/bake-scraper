@@ -336,7 +336,7 @@ def generate_with_retry(prompt, text_content, context_name="General"):
             time.sleep(2 + attempt) 
             
             response = client.models.generate_content(
-                model='gemini-2.0-flash', 
+                model='gemini-3.5-flash', 
                 contents=[prompt, text_content[:30000]]
             )
             
