@@ -733,13 +733,22 @@ def run_gemini_discovery(midnight):
     
     print(f"🧠 Running Discovery for Bay Area festivals ({range_str})...")
     
-    prompt = f"Find 8 major kids festivals in the SF Bay Area happening between {range_str}. Return JSON: [title, event_date(YYYY-MM-DD), price_text, snippet]."
+    # 1. Update the prompt to ask for zip_code and specific place_name
+    prompt = f"""Find 8 major kids festivals in the SF Bay Area happening between {range_str}. 
+    Return JSON array of objects with keys: 
+    [title, event_date(YYYY-MM-DD), price_text, snippet, zip_code, place_name].
+    
+    Instructions for zip_code:
+    - Extract the explicit 5-digit venue/location zip code for where the event takes place.
+    - If the exact zip code is not found, return the 5-digit zip code of the host city (e.g., '94103' for SF, '95113' for San Jose).
+    """
     
     events = generate_with_retry(prompt, "Bay Area", "Discovery")
     if events:
         # Use ID 9999 to prevent collision with Academy of Sciences (ID 1)
         discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category_name": "Special Events"}
         save_events(events, [{"id": 9999, "name": "Bay Area Pop-up", "zip_code": "94103"}], midnight, discovery_master, "global")
+
 
 def run_scraper():
     """
