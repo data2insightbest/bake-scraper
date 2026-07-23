@@ -264,6 +264,8 @@ def save_events(events, target_branches, midnight, master, mode):
         # --- NEW: SEARCH BLOB FOR ACCURATE MAPPING ---
         # Search title, snippet, and location field for branch keywords
         search_blob = f"{title_low} {snippet.lower()} {found_loc}"
+        # Fallback if target_branches is empty (e.g. Discovery Pop-ups)
+        effective_branches = target_branches if target_branches else [master]
         
         for branch in target_branches:
             should_save = False
@@ -303,7 +305,7 @@ def save_events(events, target_branches, midnight, master, mode):
                     'event_date': date_str,
                     'snippet': snippet,
                     'category_name': master.get('category_name') or master.get('category') or 'Special Activity',
-                    'zip_code': branch.get('zip_code'),
+                    'zip_code': ev.get('zip_code') or branch.get('zip_code'),
                     'window_type': window,
                     'specificity_score': spec_score, # Make sure this isn't hardcoded to 7!
                 }
@@ -733,22 +735,22 @@ def run_gemini_discovery(midnight):
     
     print(f"🧠 Running Discovery for Bay Area festivals ({range_str})...")
     
-    # 1. Update the prompt to ask for zip_code and specific place_name
-    prompt = f"""Find 8 major kids festivals in the SF Bay Area happening between {range_str}. 
-    Return JSON array of objects with keys: 
+    prompt = f"""Find 8 major kids festivals across different cities in the SF Bay Area happening between {range_str}. 
+    Return a valid JSON array of objects with keys: 
     [title, event_date(YYYY-MM-DD), price_text, snippet, zip_code, place_name].
     
-    Instructions for zip_code:
-    - Extract the explicit 5-digit venue/location zip code for where the event takes place.
+    CRITICAL RULES FOR ZIP CODES:
+    - Each event MUST have its own venue-specific 5-digit California ZIP code matching where the event occurs.
     - If the exact zip code is not found, return the 5-digit zip code of the host city (e.g., '94103' for SF, '95113' for San Jose).
+    - Do NOT default all events to San Francisco (94103) unless the event actually takes place in San Francisco.
+    - Examples: Oakland event = '94612', San Jose event = '95113', Palo Alto event = '94301', Berkeley event = '94704'.
     """
     
     events = generate_with_retry(prompt, "Bay Area", "Discovery")
     if events:
-        # Use ID 9999 to prevent collision with Academy of Sciences (ID 1)
         discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category_name": "Special Events"}
-        save_events(events, [{"id": 9999, "name": "Bay Area Pop-up", "zip_code": "94103"}], midnight, discovery_master, "global")
-
+        # Do not supply a hardcoded fallback place zip code here!
+        save_events(events, [], midnight, discovery_master, "global")
 
 def run_scraper():
     """
