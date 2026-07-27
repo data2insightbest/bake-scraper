@@ -728,6 +728,7 @@ def scrape_and_save_2(context, master, target_branches, mode, midnight, zip_code
             
     return clean_events
 
+import sys
 def run_gemini_discovery(midnight):
     today = datetime.now()
     future_date = today + timedelta(days=90)
@@ -746,11 +747,34 @@ def run_gemini_discovery(midnight):
     - Examples: Oakland event = '94612', San Jose event = '95113', Palo Alto event = '94301', Berkeley event = '94704'.
     """
     
-    events = generate_with_retry(prompt, "Bay Area", "Discovery")
-    if events:
-        discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category_name": "Special Events"}
-        # Do not supply a hardcoded fallback place zip code here!
+    #events = generate_with_retry(prompt, "Bay Area", "Discovery")
+    #if events:
+    #    discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category_name": "Special Events"}
+    #    # Do not supply a hardcoded fallback place zip code here!
+    #    save_events(events, [], midnight, discovery_master, "global")
+
+    print("📡 Sending prompt to Gemini...", flush=True)
+    
+    try:
+        events = generate_with_retry(prompt, "Bay Area", "Discovery")
+        print(f"📥 API Response received. Raw events type/value: {type(events)}", flush=True)
+    except Exception as e:
+        print(f"💥 FATAL ERROR during generate_with_retry: {e}", flush=True)
+        return
+
+    if not events:
+        print("❌ generate_with_retry returned None or empty list.", flush=True)
+        return
+
+    print(f"✅ Gemini returned {len(events)} events. Attempting database save...", flush=True)
+
+    discovery_master = {"id": 9999, "name": "Bay Area Pop-up", "category_name": "Special Events"}
+    
+    try:
         save_events(events, [], midnight, discovery_master, "global")
+        print("🎉 save_events completed successfully!", flush=True)
+    except Exception as e:
+        print(f"💥 FATAL ERROR during save_events: {e}", flush=True)
 
 def run_scraper():
     """
