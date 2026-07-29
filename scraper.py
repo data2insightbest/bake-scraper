@@ -267,7 +267,7 @@ def save_events(events, target_branches, midnight, master, mode):
         # Fallback if target_branches is empty (e.g. Discovery Pop-ups)
         effective_branches = target_branches if target_branches else [master]
         
-       for branch in effective_branches:
+        for branch in effective_branches:
             should_save = False
             if mode == "specific":
                 should_save = True
