@@ -18,6 +18,12 @@ jobs:
         with:
           python-version: '3.12' # Using 3.12 for better 2026 compatibility
 
+      - name: Cache Playwright Browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium
+          
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
